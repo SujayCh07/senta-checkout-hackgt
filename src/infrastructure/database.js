@@ -2,6 +2,8 @@ import { mkdirSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 
+const activeTransactions = new WeakSet();
+
 export function openDatabase({ path, busyTimeoutMs = 5000 } = {}) {
   if (!path || typeof path !== 'string') {
     throw new TypeError('A database path is required');
@@ -23,7 +25,9 @@ export function withTransaction(db, work) {
   if (!db || typeof db.exec !== 'function' || typeof work !== 'function') {
     throw new TypeError('withTransaction requires a database and callback');
   }
+  if (activeTransactions.has(db)) return work();
   db.exec('BEGIN IMMEDIATE');
+  activeTransactions.add(db);
   try {
     const result = work();
     if (result && typeof result.then === 'function') {
@@ -38,5 +42,7 @@ export function withTransaction(db, work) {
       error.rollbackError = rollbackError;
     }
     throw error;
+  } finally {
+    activeTransactions.delete(db);
   }
 }

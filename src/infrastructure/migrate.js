@@ -135,6 +135,24 @@ const migrations = [
       CREATE INDEX outbox_pending ON outbox_events(created_at) WHERE delivered_at IS NULL;
     `,
   },
+  {
+    name: '002_seed_northstar_catalog',
+    sql: `
+      INSERT INTO restaurants (id, slug, name, active, created_at) VALUES
+        ('northstar-kitchen', 'northstar-kitchen', 'Northstar Kitchen', 1, 0);
+      INSERT INTO menu_items
+        (id, restaurant_id, name, description, price_cents, currency, active, catalog_version)
+      VALUES
+        ('northstar-grain-bowl', 'northstar-kitchen', 'Northstar Grain Bowl', 'Roasted vegetables, warm grains, and lemon tahini.', 1250, 'USD', 1, 1),
+        ('crispy-chickpea-bowl', 'northstar-kitchen', 'Crispy Chickpea Bowl', 'Crispy chickpeas, greens, and herbed yogurt.', 1100, 'USD', 1, 1),
+        ('lemon-tahini-salad', 'northstar-kitchen', 'Lemon Tahini Salad', 'Seasonal greens, cucumber, and lemon tahini.', 1050, 'USD', 1, 1);
+      INSERT INTO modifiers (id, menu_item_id, name, price_delta_cents, required, active) VALUES
+        ('grain-bowl-chicken', 'northstar-grain-bowl', 'Add grilled chicken', 300, 0, 1),
+        ('grain-bowl-tofu', 'northstar-grain-bowl', 'Add tofu', 150, 0, 1),
+        ('chickpea-bowl-chicken', 'crispy-chickpea-bowl', 'Add grilled chicken', 300, 0, 1),
+        ('salad-chicken', 'lemon-tahini-salad', 'Add grilled chicken', 300, 0, 1);
+    `,
+  },
 ];
 
 export function runMigrations(db) {
