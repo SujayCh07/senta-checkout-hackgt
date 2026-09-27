@@ -95,7 +95,7 @@ test('commerce tables are strict and reject invalid order states, revisions, and
   db.prepare("INSERT INTO restaurants (id, slug, name, active, created_at) VALUES ('r', 'r', 'Restaurant', 1, 1)").run();
   db.prepare("INSERT INTO menu_items (id, restaurant_id, name, price_cents, currency, active, catalog_version) VALUES ('i', 'r', 'Item', 100, 'USD', 1, 1)").run();
   assert.throws(() => db.prepare(`INSERT INTO orders (id, user_id, restaurant_id, status, currency, subtotal_cents, total_cents, revision, created_at, updated_at)
-    VALUES ('bad-status', 'user', 'r', 'simulated_paid', 'USD', 100, 100, 1, 1, 1)`).run());
+    VALUES ('bad-status', 'user', 'r', 'not_an_order_state', 'USD', 100, 100, 1, 1, 1)`).run());
   assert.throws(() => db.prepare(`INSERT INTO orders (id, user_id, restaurant_id, status, currency, subtotal_cents, total_cents, revision, created_at, updated_at)
     VALUES ('bad-revision', 'user', 'r', 'ready', 'USD', 100, 100, 0, 1, 1)`).run());
   assert.throws(() => db.prepare(`INSERT INTO orders (id, user_id, restaurant_id, status, currency, subtotal_cents, total_cents, revision, created_at, updated_at)
