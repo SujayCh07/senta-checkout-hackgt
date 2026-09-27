@@ -1,0 +1,1385 @@
+diff --git a/src/conversations/agentLoop.ts b/src/conversations/agentLoop.ts
+index 640fd5d..3f4854c 100644
+--- a/src/conversations/agentLoop.ts
++++ b/src/conversations/agentLoop.ts
+@@ -46,0 +47,2 @@ export type AgentToolResult = {
++  /** A user-facing wait expired while this restaurant provider call is still running. */
++  inFlight?: boolean;
+@@ -100,0 +103,6 @@ export async function runAgentLoop(text: string, initialContext: SemanticPlanner
++    // A timed-out wrapper does not cancel the provider operation underneath it.
++    // Replanning here can start a second full discovery while the first search
++    // is still loading menus, so return the bounded-wait result to the user.
++    if (!result.ok && result.tool === "restaurant_search" && result.inFlight) {
++      return { plan, toolResults, steps: step, stoppedBecause: "tool_failure" };
++    }
+diff --git a/src/conversations/cloudConversationService.ts b/src/conversations/cloudConversationService.ts
+index ebac051..b6f2b2e 100644
+--- a/src/conversations/cloudConversationService.ts
++++ b/src/conversations/cloudConversationService.ts
+@@ -286,3 +286,5 @@ export class CloudConversationService {
+-      const providerBudgetMs = itemFirst ? FOOD_DISCOVERY_BUDGET_MS : providerLatencyBudgetMs(specialistForTool(payload.plan.action));
+-      const waitStartedAt = itemFirst ? Date.now() : undefined;
+-      if (itemFirst) safeLog("food_discovery_wait_started", { budget_ms: providerBudgetMs, provider: "doordash" });
++      const namedMerchantLookup = Boolean(payload.plan.searchPlan?.namedMerchant?.trim());
++      const discoveryBudgetApplies = itemFirst || namedMerchantLookup;
++      const providerBudgetMs = discoveryBudgetApplies ? FOOD_DISCOVERY_BUDGET_MS : providerLatencyBudgetMs(specialistForTool(request.tool));
++      const waitStartedAt = discoveryBudgetApplies ? Date.now() : undefined;
++      if (discoveryBudgetApplies) safeLog("food_discovery_wait_started", { budget_ms: providerBudgetMs, provider: "doordash", named_merchant: namedMerchantLookup });
+@@ -293 +295 @@ export class CloudConversationService {
+-      if (itemFirst) safeLog("food_discovery_wait_completed", { budget_ms: providerBudgetMs, elapsed_ms: waitStartedAt ? Date.now() - waitStartedAt : 0, outcome: contracted.ok ? "success" : contracted.failure });
++      if (discoveryBudgetApplies) safeLog("food_discovery_wait_completed", { budget_ms: providerBudgetMs, elapsed_ms: waitStartedAt ? Date.now() - waitStartedAt : 0, outcome: contracted.ok ? "success" : contracted.failure, named_merchant: namedMerchantLookup });
+@@ -414,0 +417 @@ export class CloudConversationService {
++        ?? (!workspace.foregroundTaskId && existing.pendingOrder?.pickupDraft?.status === "AWAITING_PAYMENT" ? existing.pendingOrder : undefined)
+@@ -464,0 +468,2 @@ export class CloudConversationService {
++            || foregroundTask.status !== refreshedTask.status
++            || (foregroundRecord && foregroundRecord.status === "completed" && refreshedTask.status === "needs_input")
+@@ -555,0 +561 @@ export class CloudConversationService {
++        || isDeliverySwitchRequest(text)
+@@ -1241,0 +1248,10 @@ export class CloudConversationService {
++    const retainedUnpaidCheckout = existing?.pendingOrder?.pickupDraft?.status === "AWAITING_PAYMENT"
++      && (existing.pendingOrder.pickupDraft.paymentStatus === "unpaid" || existing.pendingOrder.pickupDraft.paymentStatus === "checkout_created")
++      && isEditablePaidPickupCommerceTask(existing.pendingOrder)
++      ? existing.pendingOrder
++      : undefined;
++    const retainedManualDelivery = existing?.pendingOrder?.pickupDraft?.fulfillmentMode === "delivery"
++      && existing.pendingOrder.pickupDraft.manualDeliveryPending === true
++      && isEditablePaidPickupCommerceTask(existing.pendingOrder)
++      ? existing.pendingOrder
++      : undefined;
+@@ -1244,0 +1261,17 @@ export class CloudConversationService {
++    if (existing && isDeliverySwitchRequest(text)) {
++      const deliveryTask = activePickupTask ?? retainedUnpaidCheckout;
++      if (deliveryTask?.pickupDraft && this.pickupIntake) {
++        return this.updatePickupToManualDelivery(sender, existing, canonicalCheckoutTask(deliveryTask));
++      }
++      const paidTask = paidPickupTaskForStatus(existing, text);
++      if (paidTask) return { handled: true, route: "restaurant_selection", text: "That order is already paid, so I can’t switch it to delivery automatically.", taskStatus: "needs_user_input" };
++    }
++    const manualDeliveryTask = activePickupTask ?? retainedManualDelivery;
++    if (existing && manualDeliveryTask?.pickupDraft?.fulfillmentMode === "delivery"
++      && manualDeliveryTask.pickupDraft.manualDeliveryPending === true
++      && !isDeliverySwitchRequest(text)
++      && !isCurrentTaskCancellation(text, existing)
++      && !isPickupMerchantSwitchTurn(text, manualDeliveryTask)) {
++      const address = manualDeliveryAddressFromText(text);
++      if (address) return this.updatePickupToManualDelivery(sender, existing, canonicalCheckoutTask(manualDeliveryTask), address);
++    }
+@@ -1249,3 +1282,11 @@ export class CloudConversationService {
+-    if (existing && this.pickupIntake && repeatedFailedMerchantOrder && activePickupTask?.merchantQuery
+-      && merchantNameMatch(repeatedFailedMerchantOrder.merchant, activePickupTask.merchantQuery)) {
+-      const retryTask = canonicalCheckoutTask({ ...activePickupTask, status: "active", stage: "resolving_store", awaitingInput: null, noProgressCount: 0 });
++    const refinedFailedMerchant = activePickupTask
++      ? explicitMoreSpecificCanonicalMerchantMention(text, activePickupTask.merchantQuery)
++      : undefined;
++    if (existing && this.pickupIntake && activePickupTask?.merchantQuery
++      && (Boolean(refinedFailedMerchant) || Boolean(repeatedFailedMerchantOrder
++        && merchantNameMatch(repeatedFailedMerchantOrder.merchant, activePickupTask.merchantQuery)))) {
++      const retryTask = canonicalCheckoutTask({
++        ...activePickupTask,
++        ...(refinedFailedMerchant ? { merchantQuery: refinedFailedMerchant, resolvedMerchant: refinedFailedMerchant, restaurantName: refinedFailedMerchant } : {}),
++        status: "active", stage: "resolving_store", awaitingInput: null, noProgressCount: 0,
++      });
+@@ -1274,0 +1316 @@ export class CloudConversationService {
++    const foodV2AwaitingPreference = Boolean(foodV2OwnsActiveFlow && existing?.foodV2State?.clarification?.type === "food_preference");
+@@ -1315 +1356,0 @@ export class CloudConversationService {
+-    const foodV2AwaitingPreference = Boolean(foodV2OwnsActiveFlow && existing?.foodV2State?.clarification?.type === "food_preference");
+@@ -1331,0 +1373,8 @@ export class CloudConversationService {
++    const activeVerifiedMenuItemTurn = Boolean(activePickupTask
++      && activePickupTask.awaitingInput === "item"
++      && activePickupTask.resolvedStore?.providerBusinessId
++      && Boolean(activePickupTask.pickupMenuCandidates?.length)
++      && pickupItemRequestText(text)
++      && !deterministicPickupMerchantSwitch(text, activePickupTask)
++      && !extractMerchantSwitchDetails(text, activePickupTask)
++      && !isExplicitNewRestaurantDiscovery(text, activePickupTask.merchantQuery ?? ""));
+@@ -1338 +1387 @@ export class CloudConversationService {
+-      && (deterministicReplaceItemEvidence(text, activePickupTask).newOrderSignal
++      && ((deterministicReplaceItemEvidence(text, activePickupTask).newOrderSignal && !activeVerifiedMenuItemTurn)
+@@ -3689 +3738,2 @@ export class CloudConversationService {
+-    const parsed = { ...toParsedIntent(intent, requestId, location ? { latitude: location.latitude, longitude: location.longitude } : savedContext?.location, text, location?.displayLabel ?? areaLabel), orderableOnly: isOrderableFoodSearch(text), ...(location ? { locationPostalCode: location.postalCode, locationCountry: location.country } : {}), excludeCandidateIds: excludedCandidateIds, excludeStoreIds: excludedStoreIds };
++    const explicitCuisineSearch = Boolean(intent.cuisine?.trim() && explicitFoodCuisineFromText(text));
++    const parsed = { ...toParsedIntent(intent, requestId, location ? { latitude: location.latitude, longitude: location.longitude } : savedContext?.location, text, location?.displayLabel ?? areaLabel), orderableOnly: isOrderableFoodSearch(text) || explicitCuisineSearch, ...(location ? { locationPostalCode: location.postalCode, locationCountry: location.country } : {}), excludeCandidateIds: excludedCandidateIds, excludeStoreIds: excludedStoreIds };
+@@ -4922 +4972,2 @@ export class CloudConversationService {
+-        const toolDeadlineMs = itemFirst ? FOOD_DISCOVERY_BUDGET_MS : providerLatencyBudgetMs(specialist);
++        const namedMerchantLookup = Boolean(plan.searchPlan?.namedMerchant?.trim());
++        const toolDeadlineMs = itemFirst || namedMerchantLookup ? FOOD_DISCOVERY_BUDGET_MS : providerLatencyBudgetMs(specialist);
+@@ -4964,0 +5016 @@ export class CloudConversationService {
++          inFlight: tool === "restaurant_search" && result.status === "unavailable" && /timeout|deadline/i.test(result.reason ?? ""),
+@@ -6602,0 +6655,52 @@ export class CloudConversationService {
++    if (safeOperation?.operation === "set_quantity" && task.providerItemId
++      && (task.pickupDraft || task.doorDashCartUuid)) {
++      const identity = pickupIdentity(existing, sender);
++      if (!identity || !this.pickupIntake) {
++        return { handled: true, route: "restaurant_selection", text: "I couldn’t securely update that order, so I left it unchanged.", taskStatus: "failed" };
++      }
++      this.logDeterministicPickupTurn(task, "set_quantity");
++      const quantityTask = applyCheckoutTurn(task, {
++        kind: "provide_quantity",
++        confidence: 1,
++        locationText: null,
++        merchantQuery: null,
++        itemQuery: null,
++        quantity: safeOperation.quantity,
++        modifiers: [],
++      });
++      const quantitySession = {
++        ...existing,
++        pendingOrder: quantityTask,
++        taskWorkspace: projectCheckoutTask(existing.taskWorkspace, quantityTask),
++        activeGoal: checkoutTaskGoal(quantityTask),
++        pendingQuestion: undefined,
++        pendingQuestionType: undefined,
++        active: true,
++        state: "checkout_ready" as const,
++      };
++      this.logPickupResolutionMutation(task, quantityTask, "set_quantity");
++      this.save(sender, quantitySession);
++      // A quantity edit changes the provider quote. Reuse the existing cart
++      // mutation path so it verifies unpaid status, expires any open Stripe
++      // session, clears its URL, and rebuilds the quote before checkout can
++      // resume.
++      const mutationTask = canonicalCheckoutTask({
++        ...quantityTask,
++        pickupDraft: task.pickupDraft,
++        doorDashCartUuid: task.doorDashCartUuid ?? task.pickupDraft?.doorDashCartUuid ?? undefined,
++        cartState: "created",
++        cartFailureReason: undefined,
++        status: "active",
++        awaitingInput: null,
++      });
++      const mutationSession = {
++        ...quantitySession,
++        pendingOrder: mutationTask,
++        taskWorkspace: projectCheckoutTask(quantitySession.taskWorkspace, mutationTask),
++        activeGoal: checkoutTaskGoal(mutationTask),
++      };
++      this.save(sender, mutationSession);
++      safeLog("pickup_cart_modification_started", { task_id: mutationTask.taskId ?? "unknown", operation: "set_quantity", cart_uuid_present: true, provider_mutation_required: true });
++      const result = await this.pickupIntake.modifyCart(mutationTask, identity);
++      return this.pickupIntakeResponse(sender, mutationSession, result);
++    }
+@@ -7301,0 +7406,6 @@ export class CloudConversationService {
++    const unpaidCheckout = result.status === "awaiting_payment"
++      && result.draft.status === "AWAITING_PAYMENT"
++      && (result.draft.paymentStatus === "unpaid" || result.draft.paymentStatus === "checkout_created");
++    const responseTask = unpaidCheckout
++      ? canonicalCheckoutTask({ ...result.task, status: "needs_input", pickupDraft: result.draft })
++      : result.task;
+@@ -7304,3 +7414,3 @@ export class CloudConversationService {
+-      pendingOrder: result.task,
+-      taskWorkspace: projectCheckoutTask(session.taskWorkspace, result.task),
+-      activeGoal: checkoutTaskGoal(result.task),
++      pendingOrder: responseTask,
++      taskWorkspace: projectCheckoutTask(session.taskWorkspace, responseTask),
++      activeGoal: checkoutTaskGoal(responseTask),
+@@ -7309,2 +7419,2 @@ export class CloudConversationService {
+-      state: result.status === "awaiting_payment" ? "awaiting_request" : result.status === "unavailable" && !recoverablePreparationFailure ? "failed" : "checkout_ready",
+-      active: result.status !== "awaiting_payment" && (result.status !== "unavailable" || recoverablePreparationFailure),
++      state: result.status === "awaiting_payment" ? "checkout_ready" : result.status === "unavailable" && !recoverablePreparationFailure ? "failed" : "checkout_ready",
++      active: unpaidCheckout || (result.status !== "awaiting_payment" && (result.status !== "unavailable" || recoverablePreparationFailure)),
+@@ -7312 +7422 @@ export class CloudConversationService {
+-    logPickupCommerceTransition(session.pendingOrder, result.task, `intake:${result.status}`);
++    logPickupCommerceTransition(session.pendingOrder, responseTask, `intake:${result.status}`);
+@@ -7322,2 +7432,2 @@ export class CloudConversationService {
+-    const mediaAlreadySent = Boolean(result.task.candidateSetId
+-      && session.pickupRecommendationMediaShownSetIds?.includes(result.task.candidateSetId));
++    const mediaAlreadySent = Boolean(responseTask.candidateSetId
++      && session.pickupRecommendationMediaShownSetIds?.includes(responseTask.candidateSetId));
+@@ -7327 +7437 @@ export class CloudConversationService {
+-      : result.task.providerItemImageUrl ?? result.task.resolvedStore?.imageUrl;
++      : responseTask.providerItemImageUrl ?? responseTask.resolvedStore?.imageUrl;
+@@ -7329 +7439 @@ export class CloudConversationService {
+-    if (recommendationItemAlreadyShown || suppressContinuationMedia) safeLog("pickup_item_media_suppressed", { task_id: result.task.taskId ?? "unknown", reason: mediaAlreadySent ? "recommendation_set_media_already_sent" : "continuation_of_displayed_recommendation_set" });
++    if (recommendationItemAlreadyShown || suppressContinuationMedia) safeLog("pickup_item_media_suppressed", { task_id: responseTask.taskId ?? "unknown", reason: mediaAlreadySent ? "recommendation_set_media_already_sent" : "continuation_of_displayed_recommendation_set" });
+@@ -7331 +7441 @@ export class CloudConversationService {
+-      ? { ...response, media: { mediaUrl: itemMedia, caption: result.task.providerItemName ?? result.task.resolvedItem, candidateId: result.task.providerItemId } }
++      ? { ...response, media: { mediaUrl: itemMedia, caption: responseTask.providerItemName ?? responseTask.resolvedItem, candidateId: responseTask.providerItemId } }
+@@ -7343,0 +7454,33 @@ export class CloudConversationService {
++  private async updatePickupToManualDelivery(sender: string, session: Session, task: CheckoutTask, deliveryAddress?: string): Promise<ConversationResponse> {
++    const identity = pickupIdentity(session, sender);
++    if (!identity || !this.pickupIntake) {
++      return { handled: true, route: "restaurant_selection", text: "I couldn’t securely update that order, so I left it unchanged.", taskStatus: "needs_user_input" };
++    }
++    const result = await this.pickupIntake.setManualDelivery(task, identity, deliveryAddress);
++    if (result.status === "paid") {
++      return { handled: true, route: "restaurant_selection", text: "That order is already paid, so I can’t switch it to delivery automatically.", taskStatus: "needs_user_input" };
++    }
++    if (result.status === "unavailable") {
++      safeLog("pickup_manual_delivery_update_blocked", { task_id_present: Boolean(task.taskId), failure_reason: result.reason });
++      if (result.reason === "pickup_manual_delivery_persistence_failed") {
++        return { handled: true, route: "restaurant_selection", text: "The old checkout is closed, but I couldn’t save the delivery change. Say delivery to try again.", taskStatus: "needs_user_input" };
++      }
++      return { handled: true, route: "restaurant_selection", text: "I couldn’t safely close the pickup payment link, so I left that order unchanged. Please try again.", taskStatus: "needs_user_input" };
++    }
++
++    const updatedTask = canonicalCheckoutTask({ ...result.task, status: "needs_input", pickupDraft: result.draft });
++    const updatedSession: Session = {
++      ...session,
++      pendingOrder: updatedTask,
++      taskWorkspace: projectCheckoutTask(session.taskWorkspace, updatedTask),
++      activeGoal: checkoutTaskGoal(updatedTask),
++      pendingQuestion: undefined,
++      pendingQuestionType: undefined,
++      active: true,
++      state: "checkout_ready",
++    };
++    this.save(sender, updatedSession);
++    const checkout = await this.pickupIntake.confirm(updatedTask, identity);
++    return this.pickupIntakeResponse(sender, updatedSession, checkout);
++  }
++
+@@ -7685 +7828 @@ export class CloudConversationService {
+-    return { handled: true, route: "restaurant_selection", text: this.friendlyPickupText(`I found a few close matches for “${itemQuery}”:\n${formatPickupMenuLines(matches)}\nWhich one should I use?`), taskStatus: "needs_user_input", ...mediaDecision.mediaFields };
++    return { handled: true, route: "restaurant_selection", text: this.friendlyPickupText(`I found a few close matches for “${itemQuery}” on ${task.merchantQuery ?? "this restaurant"}'s menu:\n${formatPickupMenuLines(matches)}\nWhich one should I use?`), taskStatus: "needs_user_input", ...mediaDecision.mediaFields };
+@@ -8823,0 +8967,3 @@ function isBroadFoodRequestWithoutPreference(intent: Intent, text: string): bool
++  // A recognized cuisine is already a useful discovery constraint. Do not
++  // ask the customer to name a dish before searching nearby restaurants.
++  if (intent.cuisine?.trim() && explicitFoodCuisineFromText(text)) return false;
+@@ -8887,0 +9034,2 @@ function foodPreferencePolicyForIntent(intent: Intent, text?: string): FoodPrefe
++  const explicitCuisine = text ? explicitFoodCuisineFromText(text) : undefined;
++  if (explicitCuisine && intent.cuisine?.trim().toLowerCase() === explicitCuisine.toLowerCase()) return undefined;
+@@ -8938,0 +9087,12 @@ export function normalizeBroadFoodIntent(intent: Intent): Intent {
++  const namedMerchant = intent.restaurant_name?.trim() || intent.restaurant_search_plan?.namedMerchant?.trim();
++  if (namedMerchant) {
++    const merchantKey = normalizeMenuSelectionText(namedMerchant);
++    const dishIsMerchant = Boolean(intent.dish?.trim() && normalizeMenuSelectionText(intent.dish) === merchantKey);
++    const foodTypeIsMerchant = Boolean(intent.food_type?.trim() && normalizeMenuSelectionText(intent.food_type) === merchantKey);
++    return {
++      ...intent,
++      restaurant_name: intent.restaurant_name?.trim() || namedMerchant,
++      ...(dishIsMerchant ? { dish: null } : {}),
++      ...(foodTypeIsMerchant ? { food_type: null } : {}),
++    };
++  }
+@@ -8957 +9117 @@ export function normalizeBroadFoodIntent(intent: Intent): Intent {
+-  if (intent.restaurant_name || [intent.dish, intent.cuisine, intent.food_type].some((value) => Boolean(value?.trim()) && !isGenericFoodField(value!))) return intent;
++  if ([intent.dish, intent.cuisine, intent.food_type].some((value) => Boolean(value?.trim()) && !isGenericFoodField(value!))) return intent;
+@@ -9293,0 +9454,21 @@ function isRetryCurrentStep(value: string): boolean {
++function isDeliverySwitchRequest(value: string): boolean {
++  const text = value.trim().replace(/[.!?]+$/g, "").trim();
++  return /^(?:(?:actually|wait|okay|ok|yes)[,\s]+)*(?:delivery|deliver(?:\s+(?:it|that|this|my order))?|(?:i\s+want|i['’]?d\s+like|can\s+i\s+get|could\s+i\s+get)\s+(?:it\s+)?(?:for\s+)?delivery|(?:can|could)\s+you\s+deliver(?:\s+(?:it|that|this|my order))?|(?:i\s+want|i['’]?d\s+like)\s+(?:it\s+)?delivered|switch\s+(?:it\s+)?to\s+delivery|make\s+it\s+delivery)$/i.test(text);
++}
++
++function manualDeliveryAddressFromText(value: string): string | undefined {
++  const address = value.trim()
++    .replace(/^(?:(?:my\s+)?(?:delivery\s+)?address\s*(?:is|:)?|deliver\s+(?:it|that|this|my\s+order)\s+to)\s*/i, "")
++    .replace(/[.!?]+$/g, "")
++    .trim();
++  if (address.length < 8 || address.length > 240 || !/\d/.test(address)) return undefined;
++  if (!/(?:\b(?:street|st|avenue|ave|road|rd|drive|dr|boulevard|blvd|lane|ln|court|ct|way|parkway|pkwy|highway|hwy)\b|,|\b\d{5}(?:-\d{4})?\b)/i.test(address)) return undefined;
++  return address;
++}
++
++function isPickupMerchantSwitchTurn(value: string, task: CheckoutTask): boolean {
++  return Boolean(deterministicPickupMerchantSwitch(value, task)
++    || extractMerchantSwitchDetails(value, task)
++    || recognizedPickupMerchant(value, value));
++}
++
+@@ -9316,0 +9498,2 @@ function failedNamedLookupMerchantSwitch(text: string, task: CheckoutTask): Acti
++  const moreSpecificCanonical = explicitMoreSpecificCanonicalMerchantMention(text, task.merchantQuery);
++  if (moreSpecificCanonical) return { merchant: moreSpecificCanonical };
+@@ -9318 +9501,2 @@ function failedNamedLookupMerchantSwitch(text: string, task: CheckoutTask): Acti
+-  if (!merchant || merchantNameMatch(merchant, task.merchantQuery)) return undefined;
++  if (!merchant) return undefined;
++  if (merchantNameMatch(merchant, task.merchantQuery)) return undefined;
+@@ -9321,0 +9506,10 @@ function failedNamedLookupMerchantSwitch(text: string, task: CheckoutTask): Acti
++function explicitMoreSpecificCanonicalMerchantMention(text: string, currentMerchant?: string | null): string | undefined {
++  if (!currentMerchant) return undefined;
++  const normalizedText = normalizeRestaurantReference(text);
++  const currentMerchantLength = normalizeRestaurantReference(currentMerchant).length;
++  return gtRestaurantCatalog
++    .filter((restaurant) => normalizeRestaurantReference(restaurant.name).length > currentMerchantLength
++      && normalizedText.includes(normalizeRestaurantReference(restaurant.name)))
++    .sort((left, right) => normalizeRestaurantReference(right.name).length - normalizeRestaurantReference(left.name).length)[0]?.name;
++}
++
+@@ -9493 +9687,13 @@ export function pickupPaymentResponse(draft: PickupOrderDraft, url: string): Pic
+-  const summary = `Got it. ${items}.\nPickup at ${draft.restaurant.displayName}${draft.restaurant.formattedAddress ? ", " + draft.restaurant.formattedAddress : ""}.\nTotal is $${(draft.previewTotalCents! / 100).toFixed(2)}.`;
++  const isUnpaidPickupCheckout = draft.fulfillmentMode !== "delivery"
++    && draft.status === "AWAITING_PAYMENT"
++    && (draft.paymentStatus === "unpaid" || draft.paymentStatus === "checkout_created")
++    && Boolean(draft.stripeCheckoutSessionId)
++    && draft.previewTotalCents != null;
++  const providerTotalCents = draft.previewTotalCents!;
++  const sentaFeeCents = draft.sentaFeeCents ?? 0;
++  const deliveryFeeCents = draft.fulfillmentMode === "delivery" ? (draft.deliveryFeeCents ?? 0) : 0;
++  const customerTotalCents = providerTotalCents + sentaFeeCents + deliveryFeeCents;
++  const fulfillment = draft.fulfillmentMode === "delivery"
++    ? (draft.deliveryAddress ? `Delivery to ${draft.deliveryAddress}` : `Delivery from ${draft.restaurant.displayName}`)
++    : `Pickup at ${draft.restaurant.displayName}${draft.restaurant.formattedAddress ? ", " + draft.restaurant.formattedAddress : ""}`;
++  const summary = `Got it. ${items}.\n${fulfillment}.${deliveryFeeCents ? `\nDelivery fee: $${(deliveryFeeCents / 100).toFixed(2)}.` : ""}${sentaFeeCents ? `\nSenta fee: $${(sentaFeeCents / 100).toFixed(2)}.` : ""}\nTotal is $${(customerTotalCents / 100).toFixed(2)}.${isUnpaidPickupCheckout ? "\nWant delivery instead? Just say delivery." : ""}`;
+@@ -9510 +9716,3 @@ export function pickupPaymentResponse(draft: PickupOrderDraft, url: string): Pic
+-        totalCents: draft.previewTotalCents,
++        totalCents: customerTotalCents,
++        ...(sentaFeeCents ? { providerTotalCents, sentaFeeCents } : {}),
++        ...(deliveryFeeCents ? { providerTotalCents, deliveryFeeCents } : {}),
+diff --git a/src/conversations/foodOrderingCoordinator.ts b/src/conversations/foodOrderingCoordinator.ts
+index 6c1cfc5..a6d3ea1 100644
+--- a/src/conversations/foodOrderingCoordinator.ts
++++ b/src/conversations/foodOrderingCoordinator.ts
+@@ -146,0 +147,8 @@ export function deterministicOperation(text: string, task: CheckoutTask): FoodOr
++  // An explicit quantity tied to the current item is a cart correction even
++  // when the customer starts with informal cancellation language ("forget
++  // this, get me four of them"). Parse it before merchant/task replacement.
++  const quantityValue = parsePickupQuantityCorrection(value, {
++    allowBare: task.awaitingInput === "quantity" || Boolean(task.pickupDraft?.pendingCartConfirmation),
++  });
++  if (quantityValue && quantityValue >= 1 && quantityValue <= 20) return { operation: "set_quantity", quantity: quantityValue };
++
+@@ -159,5 +166,0 @@ export function deterministicOperation(text: string, task: CheckoutTask): FoodOr
+-  const quantityValue = parsePickupQuantityCorrection(value, {
+-    allowBare: task.awaitingInput === "quantity" || Boolean(task.pickupDraft?.pendingCartConfirmation),
+-  });
+-  if (quantityValue && quantityValue >= 1 && quantityValue <= 20) return { operation: "set_quantity", quantity: quantityValue };
+-
+diff --git a/src/food-v2/FoodOrchestrator.ts b/src/food-v2/FoodOrchestrator.ts
+index 8f80ec4..9e331cd 100644
+--- a/src/food-v2/FoodOrchestrator.ts
++++ b/src/food-v2/FoodOrchestrator.ts
+@@ -13,0 +14,5 @@ export class FoodOrchestratorV2 {
++    const savedMenuCategory = priorState.merchant ? matchingSavedMenuCategory(priorState, text) : undefined;
++    if (savedMenuCategory) {
++      const interpretation: FoodTurnInterpretation = { kind: "continue", action: "query_menu", dish: savedMenuCategory, text };
++      return this.showSavedMenuCategory(priorState, interpretation, savedMenuCategory);
++    }
+@@ -372,0 +378,20 @@ export class FoodOrchestratorV2 {
++  private showSavedMenuCategory(state: FoodState, interpretation: FoodTurnInterpretation, category: string): FoodOrchestratorResult {
++    const candidates = state.recommendations?.candidates ?? [];
++    const categoryItems = candidates.filter((candidate) => normalizeMenuCategory(candidate.category ?? "") === normalizeMenuCategory(category));
++    if (!categoryItems.length || !state.recommendations) return { state, interpretation, response: foodResponse(state, "query_menu", `I couldn’t find items in ${category} on ${state.merchant?.name ?? "this restaurant"}'s menu.`) };
++    const nextState: FoodState = {
++      ...state,
++      phase: "recommending",
++      clarification: undefined,
++      recommendations: {
++        ...state.recommendations,
++        displayedIndex: 0,
++        displayedCandidates: categoryItems.slice(0, 3),
++        selectedCandidateId: undefined,
++      },
++    };
++    const menuLines = formatCandidates(categoryItems);
++    const merchant = state.merchant?.name ?? "the restaurant";
++    return { state: nextState, interpretation, response: foodResponse(nextState, "query_menu", `From ${merchant}'s ${category}:\n${menuLines}\nWhich one?`) };
++  }
++
+@@ -428,0 +454,22 @@ function formatCandidates(candidates: Array<{ name: string; priceCents?: number
++function matchingSavedMenuCategory(state: FoodState, text: string): string | undefined {
++  if (!/\b(?:menu|section|category|categories)\b/i.test(text)) return undefined;
++  const categories = [...new Set((state.recommendations?.candidates ?? [])
++    .map((candidate) => candidate.category?.trim())
++    .filter((category): category is string => Boolean(category)))];
++  const requested = normalizeMenuCategory(text);
++  if (!requested) return undefined;
++  const exact = categories.filter((category) => normalizeMenuCategory(category) === requested);
++  if (exact.length === 1) return exact[0];
++  const requestedTokens = requested.split(" ");
++  const contained = categories.filter((category) => {
++    const categoryTokens = normalizeMenuCategory(category).split(" ");
++    return requestedTokens.every((token) => categoryTokens.includes(token));
++  });
++  return contained.length === 1 ? contained[0] : undefined;
++}
++
++function normalizeMenuCategory(value: string): string {
++  const ignored = new Set(["a", "an", "the", "i", "want", "like", "get", "me", "show", "please", "pls", "menu", "section", "category", "categories", "items", "from", "at", "on"]);
++  return value.toLowerCase().replace(/&/g, " and ").replace(/[^a-z0-9]+/g, " ").trim().split(/\s+/).filter((token) => !ignored.has(token)).join(" ");
++}
++
+diff --git a/src/messaging/types.ts b/src/messaging/types.ts
+index 59e5bb8..051373a 100644
+--- a/src/messaging/types.ts
++++ b/src/messaging/types.ts
+@@ -47,0 +48,3 @@ export type ConversationResponse = {
++    providerTotalCents?: number;
++    sentaFeeCents?: number;
++    deliveryFeeCents?: number;
+diff --git a/src/ordering/liveDoorDashAdapter.ts b/src/ordering/liveDoorDashAdapter.ts
+index 42259c5..6d49b21 100644
+--- a/src/ordering/liveDoorDashAdapter.ts
++++ b/src/ordering/liveDoorDashAdapter.ts
+@@ -57,0 +58 @@ export class LiveDoorDashAdapter implements DoorDashAdapter {
++    const exactNamedStores = new Map<string, { store: Record<string, unknown>; searchVariant: string }>();
+@@ -83 +84,4 @@ export class LiveDoorDashAdapter implements DoorDashAdapter {
+-        if (id && !parsed.excludeStoreIds?.includes(id) && !stores.has(id)) stores.set(id, { store, searchVariant: query });
++        if (id && !parsed.excludeStoreIds?.includes(id)) {
++          if (!stores.has(id)) stores.set(id, { store, searchVariant: query });
++          if (parsed.restaurantName && hasExactNamedMerchantIdentity(store, parsed.restaurantName)) exactNamedStores.set(id, { store, searchVariant: query });
++        }
+@@ -108,0 +113,9 @@ export class LiveDoorDashAdapter implements DoorDashAdapter {
++      if (parsed.restaurantName && exactNamedStores.size > 0) {
++        safeLog("food_search_early_stop", {
++          request_id: parsed.requestId ?? "unknown",
++          executed_query_count: executedQueryCount,
++          stores_found: exactNamedStores.size,
++          reason: "exact_named_merchant_verified",
++        });
++        break;
++      }
+@@ -116 +129,4 @@ export class LiveDoorDashAdapter implements DoorDashAdapter {
+-    const selectedStores = [...stores.values()].slice(0, maxStores);
++    // Search may return nearby alternatives alongside the requested brand.
++    // Once its exact provider-reported name is present, inspect only that
++    // merchant's menu instead of loading unrelated stores.
++    const selectedStores = (parsed.restaurantName ? [...exactNamedStores.values()] : [...stores.values()]).slice(0, maxStores);
+@@ -170 +186,2 @@ export class LiveDoorDashAdapter implements DoorDashAdapter {
+-    const targets = diverseVerificationTargets(verificationTargets, maxVerificationDetails);
++    const verificationLimit = isNamedMerchantOnlyRequest(parsed) ? 3 : maxVerificationDetails;
++    const targets = diverseVerificationTargets(verificationTargets, verificationLimit);
+@@ -291,0 +309 @@ export function classifyMenuMatch(name: string, description: string | undefined,
++  if (isNamedMerchantOnlyRequest(intent)) return "alternative";
+@@ -339,0 +358,17 @@ export function classifyMenuMatch(name: string, description: string | undefined,
++function isNamedMerchantOnlyRequest(intent: ParsedIntent): boolean {
++  const merchant = intent.restaurantName?.trim();
++  if (!merchant) return false;
++  const merchantKey = normalizeText(merchant);
++  return [intent.dish, intent.foodType]
++    .filter((value): value is string => Boolean(value?.trim()))
++    .every((value) => normalizeText(value) === merchantKey);
++}
++
++function hasExactNamedMerchantIdentity(store: Record<string, unknown>, requestedMerchant: string): boolean {
++  const requested = normalizeText(requestedMerchant);
++  if (!requested) return false;
++  const providerNames = [store.verified_name, store.verifiedName, store.name, store.store_name, store.business_name]
++    .filter((value): value is string => typeof value === "string" && Boolean(value.trim()));
++  return providerNames.some((name) => normalizeText(name) === requested);
++}
++
+diff --git a/src/payments/provider.ts b/src/payments/provider.ts
+index ef22477..3849b7e 100644
+--- a/src/payments/provider.ts
++++ b/src/payments/provider.ts
+@@ -5,0 +6,4 @@ export type CheckoutSessionRequest = {
++  /** Optional separately itemized Senta fee; excluded from amountMinor (the provider quote). */
++  sentaFeeMinor?: number;
++  /** Optional separately itemized delivery fee; excluded from amountMinor (the provider quote). */
++  deliveryFeeMinor?: number;
+diff --git a/src/payments/stripeProvider.ts b/src/payments/stripeProvider.ts
+index d0dfa11..66023f9 100644
+--- a/src/payments/stripeProvider.ts
++++ b/src/payments/stripeProvider.ts
+@@ -13,0 +14,4 @@ export class StripePaymentProvider implements PaymentProvider {
++    if (input.sentaFeeMinor !== undefined && (!Number.isInteger(input.sentaFeeMinor) || input.sentaFeeMinor < 0)) throw new Error("stripe_senta_fee_invalid");
++    if (input.deliveryFeeMinor !== undefined && (!Number.isInteger(input.deliveryFeeMinor) || input.deliveryFeeMinor < 0)) throw new Error("stripe_delivery_fee_invalid");
++    const deliveryFeeIndex = input.deliveryFeeMinor ? 1 : null;
++    const sentaFeeIndex = input.sentaFeeMinor ? (input.deliveryFeeMinor ? 2 : 1) : null;
+@@ -19,0 +24,12 @@ export class StripePaymentProvider implements PaymentProvider {
++      ...(deliveryFeeIndex !== null ? {
++        [`line_items[${deliveryFeeIndex}][price_data][currency]`]: input.currency.toLowerCase(),
++        [`line_items[${deliveryFeeIndex}][price_data][unit_amount]`]: String(input.deliveryFeeMinor),
++        [`line_items[${deliveryFeeIndex}][price_data][product_data][name]`]: "Delivery fee",
++        [`line_items[${deliveryFeeIndex}][quantity]`]: "1",
++      } : {}),
++      ...(sentaFeeIndex !== null ? {
++        [`line_items[${sentaFeeIndex}][price_data][currency]`]: input.currency.toLowerCase(),
++        [`line_items[${sentaFeeIndex}][price_data][unit_amount]`]: String(input.sentaFeeMinor),
++        [`line_items[${sentaFeeIndex}][price_data][product_data][name]`]: "Senta service fee",
++        [`line_items[${sentaFeeIndex}][quantity]`]: "1",
++      } : {}),
+@@ -22,0 +39,2 @@ export class StripePaymentProvider implements PaymentProvider {
++      ...(input.sentaFeeMinor ? { "metadata[senta_fee_cents]": String(input.sentaFeeMinor) } : {}),
++      ...(input.deliveryFeeMinor ? { "metadata[delivery_fee_cents]": String(input.deliveryFeeMinor) } : {}),
+diff --git a/src/pickup/pickupIntakeWorker.ts b/src/pickup/pickupIntakeWorker.ts
+index 1b5883d..7295bdc 100644
+--- a/src/pickup/pickupIntakeWorker.ts
++++ b/src/pickup/pickupIntakeWorker.ts
+@@ -9 +9 @@ import type { PickupOrderDraftStore } from "./pickupOrderRepository.js";
+-import { normalizePersistedProviderRequiredGroups, pickupOrderDraftSchema, transitionPickupDraft, type PickupOrderDraft } from "./pickupOrderDraft.js";
++import { DELIVERY_FEE_CENTS, normalizePersistedProviderRequiredGroups, pickupOrderDraftSchema, SENTA_ORDER_FEE_CENTS, transitionPickupDraft, type PickupOrderDraft } from "./pickupOrderDraft.js";
+@@ -20,0 +21,5 @@ export type UnloadedPickupDraftRecovery =
++export type ManualDeliveryUpdate =
++  | { status: "updated"; task: CheckoutTask; draft: PickupOrderDraft }
++  | { status: "paid" }
++  | { status: "unavailable"; reason: string };
++
+@@ -91 +96,105 @@ export class PickupIntakeWorker {
+-    return canonicalCheckoutTask({ ...task, pickupDraft: draft });
++    const unpaidCheckoutRemainsActive = draft.status === "AWAITING_PAYMENT"
++      && (draft.paymentStatus === "unpaid" || draft.paymentStatus === "checkout_created");
++    return canonicalCheckoutTask({ ...task, ...(unpaidCheckoutRemainsActive ? { status: "needs_input" as const } : {}), pickupDraft: draft });
++  }
++
++  /** Switches an unpaid pickup draft to a manual delivery handoff without mutating its provider cart. */
++  async setManualDelivery(
++    task: CheckoutTask,
++    identity: { userId: string; conversationId: string },
++    deliveryAddress?: string,
++  ): Promise<ManualDeliveryUpdate> {
++    const attached = task.pickupDraft;
++    if (!attached?.id) return { status: "unavailable", reason: "pickup_draft_missing" };
++
++    let draft: PickupOrderDraft;
++    try {
++      const canonical = await this.drafts.get(attached.id);
++      if (!canonical) return { status: "unavailable", reason: "pickup_draft_missing" };
++      draft = canonical;
++    } catch {
++      return { status: "unavailable", reason: "pickup_draft_unavailable" };
++    }
++
++    if (draft.userId !== identity.userId || draft.conversationId !== identity.conversationId
++      || (draft.checkoutTaskId && task.taskId && draft.checkoutTaskId !== task.taskId)) {
++      return { status: "unavailable", reason: "pickup_draft_identity_mismatch" };
++    }
++    if (draft.paymentStatus === "paid" || ["PAYMENT_CONFIRMED", "READY_FOR_FULFILLMENT"].includes(draft.status) || draft.providerSubmission) {
++      return { status: "paid" };
++    }
++    if (!["AWAITING_PAYMENT", "AWAITING_FINAL_CONFIRMATION"].includes(draft.status)) {
++      return { status: "unavailable", reason: "pickup_draft_not_editable" };
++    }
++    if (draft.paymentStatus !== "unpaid" && draft.paymentStatus !== "checkout_created") {
++      return { status: "unavailable", reason: "pickup_payment_status_unavailable" };
++    }
++
++    const nextAddress = deliveryAddress?.trim() || draft.deliveryAddress;
++    const alreadyUpdated = draft.fulfillmentMode === "delivery"
++      && draft.manualDeliveryPending === true
++      && draft.deliveryFeeCents === DELIVERY_FEE_CENTS
++      && draft.status === "AWAITING_PAYMENT"
++      && draft.paymentStatus === "checkout_created"
++      && Boolean(draft.stripeCheckoutSessionId && draft.paymentUrl)
++      && draft.previewTotalCents != null
++      && draft.priceIsEstimate === false
++      && draft.deliveryAddress === nextAddress;
++    if (alreadyUpdated) return { status: "updated", task: canonicalCheckoutTask({ ...task, status: "needs_input", pickupDraft: draft }), draft };
++
++    const hasCheckoutEvidence = Boolean(draft.stripeCheckoutSessionId || draft.paymentUrl || draft.status === "AWAITING_PAYMENT" || draft.paymentStatus === "checkout_created");
++    if (hasCheckoutEvidence) {
++      if (!draft.stripeCheckoutSessionId || !this.paymentProvider?.getPaymentStatus || !this.paymentProvider.expireCheckoutSession) {
++        return { status: "unavailable", reason: "pickup_payment_session_expiry_unavailable" };
++      }
++      try {
++        await this.closeUnpaidStripeSession(draft.stripeCheckoutSessionId, `manual-delivery:${draft.id}:${draft.revision}`);
++      } catch (error) {
++        if (safePickupErrorCode(error) === "pickup_paid_order_immutable") return { status: "paid" };
++        return { status: "unavailable", reason: safePickupErrorCode(error) ?? "pickup_payment_session_expiry_unavailable" };
++      }
++    }
++
++    const now = new Date().toISOString();
++    const transitioned = transitionPickupDraft(draft, "AWAITING_FINAL_CONFIRMATION", now);
++    const updatedDraft = pickupOrderDraftSchema.parse({
++      ...transitioned,
++      fulfillmentMode: "delivery",
++      manualDeliveryPending: true,
++      deliveryFeeCents: DELIVERY_FEE_CENTS,
++      ...(nextAddress ? { deliveryAddress: nextAddress } : {}),
++      status: "AWAITING_FINAL_CONFIRMATION",
++      paymentStatus: "unpaid",
++      stripeCheckoutSessionId: null,
++      paymentUrl: null,
++      stripePaymentIntentId: null,
++      stripeAmountTotalCents: null,
++      stripeDiscountCents: null,
++      finalConfirmedAt: null,
++      revision: Math.max(draft.revision + 1, transitioned.revision),
++      updatedAt: now,
++    });
++
++    try {
++      await this.drafts.save(updatedDraft);
++      const persisted = await this.drafts.get(updatedDraft.id);
++      if (!persisted || persisted.id !== draft.id || persisted.userId !== identity.userId || persisted.conversationId !== identity.conversationId
++        || persisted.fulfillmentMode !== "delivery" || persisted.manualDeliveryPending !== true
++        || persisted.deliveryFeeCents !== DELIVERY_FEE_CENTS
++        || persisted.stripeCheckoutSessionId !== null || persisted.paymentUrl !== null
++        || persisted.previewTotalCents !== draft.previewTotalCents || persisted.previewTotalDisplay !== draft.previewTotalDisplay
++        || persisted.deliveryAddress !== nextAddress) {
++        return { status: "unavailable", reason: "pickup_manual_delivery_persistence_failed" };
++      }
++      safeLog("pickup_manual_delivery_update_pending", {
++        task_id_present: Boolean(task.taskId),
++        draft_id_present: true,
++        delivery_address_present: Boolean(persisted.deliveryAddress),
++        stripe_session_expired: hasCheckoutEvidence,
++        provider_cart_mutated: false,
++        provider_order_submitted: false,
++      });
++      return { status: "updated", task: canonicalCheckoutTask({ ...task, status: "needs_input", pickupDraft: persisted }), draft: persisted };
++    } catch {
++      return { status: "unavailable", reason: "pickup_manual_delivery_persistence_failed" };
++    }
+@@ -1596,2 +1705,4 @@ export class PickupIntakeWorker {
+-    if (!payableDraft.checkoutTaskId) payableDraft = { ...payableDraft, checkoutTaskId: task.taskId ?? payableDraft.id };
+-    const idempotencyKey = createHash("sha256").update(`${payableDraft.id}:${payableDraft.revision}:${costTruth.amountCents}:USD`).digest("hex");
++    const sentaFeeCents = payableDraft.sentaFeeCents ?? SENTA_ORDER_FEE_CENTS;
++    const deliveryFeeCents = payableDraft.fulfillmentMode === "delivery" ? (payableDraft.deliveryFeeCents ?? DELIVERY_FEE_CENTS) : 0;
++    payableDraft = { ...payableDraft, ...(payableDraft.checkoutTaskId ? {} : { checkoutTaskId: task.taskId ?? payableDraft.id }), sentaFeeCents, ...(deliveryFeeCents ? { deliveryFeeCents } : {}) };
++    const idempotencyKey = createHash("sha256").update(`${payableDraft.id}:${payableDraft.revision}:${costTruth.amountCents}:delivery-fee-${deliveryFeeCents}:senta-fee-${sentaFeeCents}:USD`).digest("hex");
+@@ -1605,0 +1717,2 @@ export class PickupIntakeWorker {
++      sentaFeeMinor: sentaFeeCents,
++      ...(deliveryFeeCents ? { deliveryFeeMinor: deliveryFeeCents } : {}),
+@@ -1612 +1725 @@ export class PickupIntakeWorker {
+-      metadata: { pickup_order_id: payableDraft.id, pickup_draft_id: payableDraft.id, checkout_task_id: payableDraft.checkoutTaskId ?? task.taskId ?? payableDraft.id, cart_uuid: payableDraft.doorDashCartUuid!, provider: "doordash", conversation_id: payableDraft.conversationId },
++      metadata: { pickup_order_id: payableDraft.id, pickup_draft_id: payableDraft.id, checkout_task_id: payableDraft.checkoutTaskId ?? task.taskId ?? payableDraft.id, cart_uuid: payableDraft.doorDashCartUuid!, provider: "doordash", conversation_id: payableDraft.conversationId, senta_fee_cents: String(sentaFeeCents), ...(deliveryFeeCents ? { delivery_fee_cents: String(deliveryFeeCents) } : {}) },
+@@ -1983 +2096,6 @@ function paymentSummary(draft: PickupOrderDraft, url: string): string {
+-  return `Got it. ${items}.\nPickup at ${draft.restaurant.displayName}${draft.restaurant.formattedAddress ? ", " + draft.restaurant.formattedAddress : ""}.\nTotal is $${(draft.previewTotalCents! / 100).toFixed(2)}.\n${url}`;
++  const fee = draft.sentaFeeCents ?? 0;
++  const deliveryFee = draft.fulfillmentMode === "delivery" ? (draft.deliveryFeeCents ?? DELIVERY_FEE_CENTS) : 0;
++  const fulfillment = draft.fulfillmentMode === "delivery"
++    ? (draft.deliveryAddress ? `Delivery to ${draft.deliveryAddress}` : `Delivery from ${draft.restaurant.displayName}`)
++    : `Pickup at ${draft.restaurant.displayName}${draft.restaurant.formattedAddress ? ", " + draft.restaurant.formattedAddress : ""}`;
++  return `Got it. ${items}.\n${fulfillment}.${deliveryFee ? `\nDelivery fee: $${(deliveryFee / 100).toFixed(2)}.` : ""}${fee ? `\nSenta fee: $${(fee / 100).toFixed(2)}.` : ""}\nTotal is $${((draft.previewTotalCents! + fee + deliveryFee) / 100).toFixed(2)}.\n${url}`;
+diff --git a/src/pickup/pickupOrderDraft.ts b/src/pickup/pickupOrderDraft.ts
+index 0c1d688..b5bc37d 100644
+--- a/src/pickup/pickupOrderDraft.ts
++++ b/src/pickup/pickupOrderDraft.ts
+@@ -2,0 +3,3 @@ import { z } from "zod";
++export const SENTA_ORDER_FEE_CENTS = 50;
++export const DELIVERY_FEE_CENTS = 500;
++
+@@ -58,0 +62,4 @@ export const pickupOrderDraftSchema = z.object({
++  /** Requested fulfillment for the operator handoff; fulfillmentType remains the provider cart's actual mode. */
++  fulfillmentMode: z.enum(["pickup", "delivery"]).optional(),
++  manualDeliveryPending: z.boolean().optional(),
++  deliveryAddress: z.string().trim().min(1).max(300).optional(),
+@@ -130,0 +138,4 @@ export const pickupOrderDraftSchema = z.object({
++  /** Fee snapshot charged by Senta separately from the authoritative provider quote. */
++  sentaFeeCents: z.number().int().nonnegative().optional(),
++  /** Flat delivery surcharge, separate from the verified provider quote and Senta fee. */
++  deliveryFeeCents: z.number().int().nonnegative().optional(),
+diff --git a/src/pickup/pickupPaymentService.ts b/src/pickup/pickupPaymentService.ts
+index c4888c1..e0f50f4 100644
+--- a/src/pickup/pickupPaymentService.ts
++++ b/src/pickup/pickupPaymentService.ts
+@@ -30 +30,8 @@ export class PickupPaymentService {
+-      if (draft.priceIsEstimate || event.amountTotal == null || event.amountTotal < 0 || (!draft.stripeCouponId && event.amountTotal !== draft.previewTotalCents) || (draft.stripeCouponId && event.amountTotal > (draft.previewTotalCents ?? 0))) throw new Error("pickup_payment_amount_mismatch");
++      const sentaFeeCents = draft.sentaFeeCents ?? 0;
++      const deliveryFeeCents = draft.fulfillmentMode === "delivery" ? (draft.deliveryFeeCents ?? 0) : 0;
++      const expectedCheckoutTotal = (draft.previewTotalCents ?? 0) + sentaFeeCents + deliveryFeeCents;
++      if (draft.priceIsEstimate || event.amountTotal == null || event.amountTotal < sentaFeeCents
++        || (!draft.stripeCouponId && event.amountTotal !== expectedCheckoutTotal)
++        || (draft.stripeCouponId && event.amountTotal > expectedCheckoutTotal)
++        || (sentaFeeCents > 0 && event.metadata.senta_fee_cents !== String(sentaFeeCents))
++        || (deliveryFeeCents > 0 && event.metadata.delivery_fee_cents !== String(deliveryFeeCents))) throw new Error("pickup_payment_amount_mismatch");
+@@ -36 +43 @@ export class PickupPaymentService {
+-      safeLog("pickup_payment_cost_verified", { draft_id: draft.id, cost_stage: costTruth.stage, cost_source: costTruth.source, stripe_amount_subtotal: draft.previewTotalCents ?? 0, stripe_amount_discount: Math.max(0, (draft.previewTotalCents ?? 0) - event.amountTotal), stripe_amount_total: event.amountTotal, zero_dollar_checkout: event.amountTotal === 0, amount_matches_quote: true });
++      safeLog("pickup_payment_cost_verified", { draft_id: draft.id, cost_stage: costTruth.stage, cost_source: costTruth.source, stripe_amount_subtotal: draft.previewTotalCents ?? 0, stripe_amount_service_fee: sentaFeeCents, stripe_amount_delivery_fee: deliveryFeeCents, stripe_amount_discount: Math.max(0, expectedCheckoutTotal - event.amountTotal), stripe_amount_total: event.amountTotal, zero_dollar_checkout: event.amountTotal === 0, amount_matches_quote_and_fee: true });
+@@ -39 +46 @@ export class PickupPaymentService {
+-        draft = transitionPickupDraft({ ...draft, stripeAmountTotalCents: event.amountTotal, stripeDiscountCents: Math.max(0, (draft.previewTotalCents ?? 0) - event.amountTotal), paymentStatus: "paid", stripePaymentIntentId: event.paymentIntentId ?? null }, "PAYMENT_CONFIRMED");
++        draft = transitionPickupDraft({ ...draft, stripeAmountTotalCents: event.amountTotal, stripeDiscountCents: Math.max(0, expectedCheckoutTotal - event.amountTotal), paymentStatus: "paid", stripePaymentIntentId: event.paymentIntentId ?? null }, "PAYMENT_CONFIRMED");
+@@ -59 +66 @@ export class PickupPaymentService {
+-        notifications.push({ kind: "customer", run: () => this.effects.notifyCustomer!(notificationDraft, "payment went through. getting your pickup order submitted now", `pickup-paid:${notificationDraft.id}`) });
++        notifications.push({ kind: "customer", run: () => this.effects.notifyCustomer!(notificationDraft, notificationDraft.fulfillmentMode === "delivery" ? "Payment went through. I’ll get the delivery handoff ready." : "payment went through. getting your pickup order submitted now", `pickup-paid:${notificationDraft.id}`) });
+@@ -128 +135,2 @@ export function pickupOperatorMessage(draft: PickupOrderDraft): string {
+-    "Fulfillment: pickup",
++    draft.fulfillmentMode === "delivery" ? "Fulfillment: delivery (manual handoff)" : "Fulfillment: pickup",
++    ...(draft.fulfillmentMode === "delivery" && draft.deliveryAddress ? [`Delivery address: ${draft.deliveryAddress}`] : []),
+@@ -133,0 +142,2 @@ export function pickupOperatorMessage(draft: PickupOrderDraft): string {
++    ...((draft.sentaFeeCents ?? 0) > 0 ? [`Senta service fee: $${((draft.sentaFeeCents ?? 0) / 100).toFixed(2)} ${draft.currency}`] : []),
++    ...((draft.fulfillmentMode === "delivery" && (draft.deliveryFeeCents ?? 0) > 0) ? [`Delivery fee: $${((draft.deliveryFeeCents ?? 0) / 100).toFixed(2)} ${draft.currency}`] : []),
+diff --git a/src/pickup/quantityCorrection.ts b/src/pickup/quantityCorrection.ts
+index 2f4ab6d..09c4820 100644
+--- a/src/pickup/quantityCorrection.ts
++++ b/src/pickup/quantityCorrection.ts
+@@ -21,0 +22 @@ export function parsePickupQuantityCorrection(text: string, options: { allowBare
++    ?? new RegExp(`^(?:(?:actually|please)\\s+)*(?:(?:forget|cancel)\\s+(?:this|that|it)[,;]\\s*)?(?:(?:can|could)\\s+you\\s+)?(?:please\\s+)?(?:get|make|change|set)\\s+(?:me\\s+)?(${quantityToken})\\s+of\\s+(?:them|those|it|that|the\\s+same)(?:\\s+please)?[.!?]*$`, "i").exec(value)
+diff --git a/src/routes/server.ts b/src/routes/server.ts
+index 393a433..70c3f7a 100644
+--- a/src/routes/server.ts
++++ b/src/routes/server.ts
+@@ -1057,0 +1058,3 @@ export async function enqueuePickupPaymentLinkOperatorAlert(
++    ...(alert.providerTotalCents != null ? [`DoorDash total: $${(alert.providerTotalCents / 100).toFixed(2)} ${alert.currency}`] : []),
++    ...(alert.deliveryFeeCents ? [`Delivery fee: $${(alert.deliveryFeeCents / 100).toFixed(2)} ${alert.currency}`] : []),
++    ...(alert.sentaFeeCents ? [`Senta fee: $${(alert.sentaFeeCents / 100).toFixed(2)} ${alert.currency}`] : []),
+diff --git a/tests/agentLoop.test.ts b/tests/agentLoop.test.ts
+index c0ceeae..6f90335 100644
+--- a/tests/agentLoop.test.ts
++++ b/tests/agentLoop.test.ts
+@@ -181,0 +182,19 @@ describe("central agent loop", () => {
++  it("does not replan a restaurant search after its provider deadline expires", async () => {
++    const reason = vi.fn(async () => plan("search_places", "Find Sankranti Indian Kitchen"));
++    const execute = vi.fn(async (): Promise<AgentToolResult> => ({
++      tool: "restaurant_search",
++      type: "search_results",
++      ok: false,
++      status: "provider_unavailable",
++      retryable: true,
++      inFlight: true,
++      summary: "The bounded search wait expired while provider work remained in flight.",
++    }));
++
++    const result = await runAgentLoop("I want Sankranti Indian Kitchen", context, { reason, execute });
++
++    expect(execute).toHaveBeenCalledOnce();
++    expect(reason).toHaveBeenCalledOnce();
++    expect(result.stoppedBecause).toBe("tool_failure");
++  });
++
+diff --git a/tests/doorDashPickupCatalog.test.ts b/tests/doorDashPickupCatalog.test.ts
+index f9cfb82..3519245 100644
+--- a/tests/doorDashPickupCatalog.test.ts
++++ b/tests/doorDashPickupCatalog.test.ts
+@@ -290,0 +291,9 @@ describe("DoorDash pickup catalog normalization", () => {
++  it("safely matches Chipotle's short brand to its verified full merchant name", () => {
++    const [chipotle] = normalizeStore({ store_id: "chipotle-1", name: "Chipotle Mexican Grill", verified_name: "Chipotle Mexican Grill" }, undefined, { latitude: 33.75, longitude: -84.39 }, "Chipotle");
++    const [tacoMac] = normalizeStore({ store_id: "taco-mac", name: "Taco Mac", verified_name: "Taco Mac" }, undefined, { latitude: 33.75, longitude: -84.39 }, "Taco Bell");
++
++    expect(namedMerchantIdentityMatch(chipotle, "Chipotle")).toMatchObject({ matchType: "exact_canonical_name" });
++    expect(namedMerchantIdentityMatch(chipotle, "Chipotle Mexican Grill")).toMatchObject({ matchType: "exact_verified_name" });
++    expect(namedMerchantIdentityMatch(tacoMac, "Taco Bell")).toMatchObject({ matchType: "no_match" });
++  });
++
+diff --git a/tests/foodOrchestratorV2Integration.test.ts b/tests/foodOrchestratorV2Integration.test.ts
+index 2c5ce84..2973983 100644
+--- a/tests/foodOrchestratorV2Integration.test.ts
++++ b/tests/foodOrchestratorV2Integration.test.ts
+@@ -5 +5 @@ import { config } from "../src/config.js";
+-import { hashSender } from "../src/conversations/sessionStore.js";
++import { hashSender, normalizeSession } from "../src/conversations/sessionStore.js";
+@@ -10,0 +11,2 @@ import { DoorDashPickupCatalog } from "../src/pickup/doorDashPickupCatalog.js";
++import { canonicalCheckoutTask } from "../src/checkout/checkoutTask.js";
++import { projectCheckoutTask } from "../src/tasks/taskOrchestrator.js";
+@@ -87 +89 @@ function makeService(queue: IntegrationQueue, provider: IntentProvider, shortlis
+-function makeServiceWithPickupIntake(queue: IntegrationQueue, provider: IntentProvider, pickupIntake: PickupIntakeWorker) {
++function makeServiceWithPickupIntake(queue: IntegrationQueue, provider: IntentProvider, pickupIntake: PickupIntakeWorker, dineOutProvider?: unknown) {
+@@ -96 +98 @@ function makeServiceWithPickupIntake(queue: IntegrationQueue, provider: IntentPr
+-    undefined,
++    dineOutProvider as never,
+@@ -123,0 +126,131 @@ describe("FoodOrchestratorV2 production entry integration", () => {
++  it("keeps an item request scoped to the verified merchant after session rehydration", async () => {
++    const sender = "test-sender-4100";
++    const queue = new IntegrationQueue();
++    const tacoCandidates = [
++      { displayIndex: 1, providerItemId: "taco-cantina-quesadilla", providerMenuId: "menu-taco", name: "Cantina Chicken Quesadilla", priceCents: 599, matchScore: 1, category: "Cantina Chicken" },
++      { displayIndex: 2, providerItemId: "taco-soft-taco", providerMenuId: "menu-taco", name: "Soft Taco", priceCents: 229, matchScore: 0.9, category: "Tacos" },
++      { displayIndex: 3, providerItemId: "taco-value-wrap", providerMenuId: "menu-taco", name: "Cheesy Roll Up", priceCents: 199, matchScore: 0.8, category: "Luxe Value Menu" },
++    ];
++    const shortlist = vi.fn(async () => ({ ...shortlistFor("Taco Bell"), menuId: "menu-taco", candidates: tacoCandidates, allCandidates: tacoCandidates }));
++    const resolvePickupTurn = vi.fn();
++    const discover = vi.fn(async () => ({ candidates: [{ id: "velvet-bowl", name: "Rotisserie Chicken Bowl", provider: "doordash", providerMerchantId: "velvet-store", providerMenuId: "velvet-menu", providerItemId: "velvet-item", restaurant: "Velvet Taco" }] }));
++    const provider: IntentProvider = { extract: vi.fn(), resolvePickupTurn, composeConversation: vi.fn(async (context) => context.fallbackText) };
++    config.foodOrchestratorV2Enabled = true;
++    config.foodOrchestratorV2Allowlist = [sender];
++    const key = hashSender(sender, config.senderHashSecret);
++    queue.saveSession(key, sender, session(key));
++    const service = makeServiceWithPickupIntake(queue, provider, { shortlist } as never, { discover } as never);
++
++    const first = await service.handle(sender, "Can you get me Taco Bell");
++    const storedAfterResponse = queue.getSession(key)!.session;
++    const rehydrated = normalizeSession(JSON.parse(JSON.stringify(storedAfterResponse)), key)!;
++    queue.saveSession(key, sender, rehydrated);
++    const second = await service.handle(sender, "I want the cantina chicken quesadilla");
++    const storedAfterItem = queue.getSession(key)!.session;
++
++    expect(first.text).toContain("Taco Bell");
++    expect(storedAfterResponse.pendingOrder?.resolvedStore).toMatchObject({ name: "Taco Bell", providerBusinessId: "dd:store:taco" });
++    expect(storedAfterResponse.pendingOrder?.pickupMenuCandidates?.map((candidate) => candidate.providerItemId)).toContain("taco-cantina-quesadilla");
++    expect(rehydrated.pendingOrder?.resolvedStore).toMatchObject({ name: "Taco Bell", providerBusinessId: "dd:store:taco" });
++    expect(rehydrated.pendingOrder?.pickupMenuCandidates?.map((candidate) => candidate.providerItemId)).toContain("taco-cantina-quesadilla");
++    expect(second.text).not.toContain("Velvet Taco");
++    expect(storedAfterItem.pendingOrder?.resolvedStore?.name).toBe("Taco Bell");
++    expect(storedAfterItem.pendingOrder).toMatchObject({ merchantQuery: "Taco Bell", providerItemId: "taco-cantina-quesadilla", providerMenuId: "menu-taco", resolvedStore: { providerBusinessId: "dd:store:taco" } });
++    expect(discover).not.toHaveBeenCalled();
++  });
++
++  it("uses retained Taco Bell categories directly without semantic resolution", async () => {
++    const sender = "test-sender-4101";
++    const queue = new IntegrationQueue();
++    const tacoCandidates = [
++      { displayIndex: 1, providerItemId: "taco-cantina-quesadilla", providerMenuId: "menu-taco", name: "Cantina Chicken Quesadilla", priceCents: 599, matchScore: 1, category: "Cantina Chicken" },
++      { displayIndex: 2, providerItemId: "taco-value-wrap", providerMenuId: "menu-taco", name: "Cheesy Roll Up", priceCents: 199, matchScore: 0.8, category: "Luxe Value Menu" },
++      { displayIndex: 3, providerItemId: "taco-soft-taco", providerMenuId: "menu-taco", name: "Soft Taco", priceCents: 229, matchScore: 0.9, category: "Tacos" },
++    ];
++    const shortlist = vi.fn(async () => ({ ...shortlistFor("Taco Bell"), menuId: "menu-taco", candidates: tacoCandidates, allCandidates: tacoCandidates }));
++    const resolvePickupTurn = vi.fn(async () => ({ action: "clarify" as const, candidate_id: null, text_argument: null, confidence: 0.9 }));
++    const provider: IntentProvider = { extract: vi.fn(), resolvePickupTurn, composeConversation: vi.fn(async (context) => context.fallbackText) };
++    config.foodOrchestratorV2Enabled = true;
++    config.foodOrchestratorV2Allowlist = [sender];
++    const key = hashSender(sender, config.senderHashSecret);
++    const foodCandidates = tacoCandidates.map((candidate) => ({
++      id: `doordash:${candidate.providerItemId}`,
++      name: candidate.name,
++      restaurant: "Taco Bell",
++      provider: "doordash",
++      providerMerchantId: "dd:store:taco",
++      providerMenuId: candidate.providerMenuId,
++      providerItemId: candidate.providerItemId,
++      priceCents: candidate.priceCents,
++      category: candidate.category,
++    }));
++    const foodState: FoodState = {
++      phase: "clarifying",
++      clarification: { type: "food_preference", resumeAction: "query_menu" },
++      request: { merchant: "Taco Bell", preferences: [], location: { displayLabel: location.displayLabel, postalCode: location.postalCode, city: location.city, state: location.state, latitude: location.latitude, longitude: location.longitude } },
++      merchant: { name: "Taco Bell", storeId: "dd:store:taco" },
++      recommendations: { candidates: foodCandidates, displayedCandidates: [], displayedIndex: 0, candidateSetId: "taco-menu-set" },
++    };
++    const pendingOrder = canonicalCheckoutTask({
++      goal: "restaurant_checkout",
++      taskId: "taco-category-context",
++      status: "needs_input",
++      stage: "awaiting_items",
++      awaitingInput: "item",
++      merchantQuery: "Taco Bell",
++      resolvedMerchant: "Taco Bell",
++      restaurantName: "Taco Bell",
++      pickupRequested: true,
++      resolvedStore: { candidateId: "doordash:dd:store:taco", name: "Taco Bell", address: "REDACTED TEST STORE ADDRESS", provider: "doordash", providerBusinessId: "dd:store:taco", selectionMode: "deterministic", identityScore: 1, evidenceTags: ["ddcli_authoritative"] },
++      pickupMenuCandidates: tacoCandidates.map((candidate, index) => ({ ...candidate, displayIndex: index + 1 })),
++    });
++    const seeded = { ...session(key, foodState), pendingOrder, taskWorkspace: projectCheckoutTask({ tasks: [] }, pendingOrder) };
++    queue.saveSession(key, sender, seeded);
++    const service = makeService(queue, provider, shortlist);
++
++    const afterMerchant = queue.getSession(key)!.session;
++    const response = await service.handle(sender, "I want the luxe value menu");
++    const stored = queue.getSession(key)!.session;
++
++    expect(response.text).toContain("Luxe Value Menu");
++    expect(response.text).toContain("Cheesy Roll Up");
++    expect(response.text).not.toMatch(/moment|search/i);
++    expect(resolvePickupTurn).not.toHaveBeenCalled();
++    expect(shortlist).not.toHaveBeenCalled();
++    expect(afterMerchant.pendingOrder?.resolvedStore).toMatchObject({ name: "Taco Bell", providerBusinessId: "dd:store:taco" });
++    expect(stored.foodV2State?.merchant).toEqual({ name: "Taco Bell", storeId: "dd:store:taco" });
++    expect(stored.foodV2State?.recommendations?.displayedCandidates?.map((candidate) => candidate.name)).toEqual(["Cheesy Roll Up"]);
++    expect(stored.pendingOrder).toMatchObject({ merchantQuery: "Taco Bell", resolvedStore: { providerBusinessId: "dd:store:taco" } });
++  });
++
++  it.each([
++    { label: "ambiguous menu item", query: "I want chicken", expected: ["Cantina Chicken Quesadilla", "Cantina Chicken Burrito"] },
++    { label: "item missing from menu", query: "I want a burger", expected: ["don’t see", "Taco Bell menu"] },
++  ])("keeps $label recovery inside Taco Bell", async ({ query, expected }) => {
++    const sender = `test-sender-${query.includes("burger") ? "3" : "2"}`;
++    const queue = new IntegrationQueue();
++    const tacoCandidates = [
++      { displayIndex: 1, providerItemId: "taco-cantina-quesadilla", providerMenuId: "menu-taco", name: "Cantina Chicken Quesadilla", priceCents: 599, matchScore: 1, category: "Cantina Chicken" },
++      { displayIndex: 2, providerItemId: "taco-cantina-burrito", providerMenuId: "menu-taco", name: "Cantina Chicken Burrito", priceCents: 649, matchScore: 0.99, category: "Cantina Chicken" },
++      { displayIndex: 3, providerItemId: "taco-soft-taco", providerMenuId: "menu-taco", name: "Soft Taco", priceCents: 229, matchScore: 0.8, category: "Tacos" },
++    ];
++    const shortlist = vi.fn(async () => ({ ...shortlistFor("Taco Bell"), menuId: "menu-taco", candidates: tacoCandidates, allCandidates: tacoCandidates }));
++    const discover = vi.fn(async () => ({ candidates: [] }));
++    const provider: IntentProvider = { extract: vi.fn(), composeConversation: vi.fn(async (context) => context.fallbackText) };
++    config.foodOrchestratorV2Enabled = true;
++    config.foodOrchestratorV2Allowlist = [sender];
++    const key = hashSender(sender, config.senderHashSecret);
++    queue.saveSession(key, sender, session(key));
++    const service = makeServiceWithPickupIntake(queue, provider, { shortlist } as never, { discover } as never);
++
++    await service.handle(sender, "Can you get me Taco Bell");
++    const response = await service.handle(sender, query);
++    const stored = queue.getSession(key)!.session;
++
++    for (const fragment of expected) expect(response.text?.toLowerCase()).toContain(fragment.toLowerCase());
++    expect(response.text).not.toContain("Velvet Taco");
++    expect(stored.pendingOrder?.merchantQuery).toBe("Taco Bell");
++    expect(stored.pendingOrder?.resolvedStore?.providerBusinessId).toBe("dd:store:taco");
++    expect(discover).not.toHaveBeenCalled();
++  });
++
+diff --git a/tests/foodOrderingCoordinator.test.ts b/tests/foodOrderingCoordinator.test.ts
+index 21ea63a..3e88938 100644
+--- a/tests/foodOrderingCoordinator.test.ts
++++ b/tests/foodOrderingCoordinator.test.ts
+@@ -73,0 +74,13 @@ describe("food ordering coordinator", () => {
++  it.each([
++    ["make it 4", 4],
++    ["actually get me 4 of them", 4],
++    ["forget this, can you get me 4 of them?", 4],
++  ] as const)("prioritizes an explicit quantity reference over cancellation wording: %s", (reply, quantity) => {
++    expect(deterministicOperation(reply, task({ pickupRequested: true, stage: "restaurant_selected", awaitingInput: null })))
++      .toEqual({ operation: "set_quantity", quantity });
++  });
++
++  it("still treats a standalone forget-my-order request as cancellation", () => {
++    expect(deterministicOperation("forget my order", task({ pickupRequested: true }))).toEqual({ operation: "cancel" });
++  });
++
+diff --git a/tests/pickupCheckoutBoundary.test.ts b/tests/pickupCheckoutBoundary.test.ts
+index 5e711f8..e04cba6 100644
+--- a/tests/pickupCheckoutBoundary.test.ts
++++ b/tests/pickupCheckoutBoundary.test.ts
+@@ -161,0 +162,2 @@ describe("paid pickup checkout boundary", () => {
++    expect(stripeBody.get("line_items[1][price_data][unit_amount]")).toBe("50");
++    expect(stripeBody.get("line_items[1][price_data][product_data][name]")).toBe("Senta service fee");
+@@ -170,2 +172,2 @@ describe("paid pickup checkout boundary", () => {
+-      object: "checkout.session", id: "cs_test_boundary", payment_status: "paid", payment_intent: "pi_test_boundary", amount_total: 899, currency: "usd",
+-      metadata: { pickup_draft_id: prepared.draft.id, pickup_order_id: prepared.draft.id, checkout_task_id: task.taskId, cart_uuid: "cart-boundary", provider: "doordash" },
++      object: "checkout.session", id: "cs_test_boundary", payment_status: "paid", payment_intent: "pi_test_boundary", amount_total: 949, currency: "usd",
++      metadata: { pickup_draft_id: prepared.draft.id, pickup_order_id: prepared.draft.id, checkout_task_id: task.taskId, cart_uuid: "cart-boundary", provider: "doordash", senta_fee_cents: "50" },
+@@ -187 +189 @@ describe("paid pickup checkout boundary", () => {
+-    expect(paidDraft).toMatchObject({ status: "READY_FOR_FULFILLMENT", paymentStatus: "paid", doorDashCartUuid: "cart-boundary", previewTotalCents: 899 });
++    expect(paidDraft).toMatchObject({ status: "READY_FOR_FULFILLMENT", paymentStatus: "paid", doorDashCartUuid: "cart-boundary", previewTotalCents: 899, sentaFeeCents: 50, stripeAmountTotalCents: 949, stripeDiscountCents: 0 });
+diff --git a/tests/pickupConversation.test.ts b/tests/pickupConversation.test.ts
+index f9711ff..e62de0a 100644
+--- a/tests/pickupConversation.test.ts
++++ b/tests/pickupConversation.test.ts
+@@ -276 +276,5 @@ describe("pickup intake conversation", () => {
+-  it("asks what food the user wants for cuisine-only requests", async () => {
++  it.each([
++    ["I want Indian food", "Indian"],
++    ["Indian food", "Indian"],
++    ["I want Mexican food", "Mexican"],
++  ])("starts restaurant discovery for cuisine-only request: %s", async (message, cuisine) => {
+@@ -278,2 +282,2 @@ describe("pickup intake conversation", () => {
+-    const sender = "test-sender-3988";
+-    const americanIntent: Intent = {
++    const sender = `test-sender-3988-${cuisine.length}`;
++    const cuisineIntent: Intent = {
+@@ -281 +285 @@ describe("pickup intake conversation", () => {
+-      query: "American food",
++      query: `${cuisine} food`,
+@@ -283 +287 @@ describe("pickup intake conversation", () => {
+-      cuisine: "American",
++      cuisine,
+@@ -286 +290 @@ describe("pickup intake conversation", () => {
+-      preferences: ["dine out"],
++      preferences: message === "Indian food" ? [] : ["dine out"],
+@@ -288,0 +293 @@ describe("pickup intake conversation", () => {
++    const location = { displayLabel: "Atlanta 30332", postalCode: "30332", city: "Atlanta", state: "GA", latitude: 33.749, longitude: -84.388, source: "user_zip" as const, updatedAt: new Date().toISOString(), expiresAt: new Date(Date.now() + 60_000).toISOString() };
+@@ -290 +295 @@ describe("pickup intake conversation", () => {
+-    const response = await (fixture.cloud as any).start(sender, "I want American food", americanIntent);
++    const response = await (fixture.cloud as any).start(sender, message, cuisineIntent, location);
+@@ -292,3 +297,17 @@ describe("pickup intake conversation", () => {
+-    expect(response.text).toBe("What are you looking for, like tacos, burgers, or pizza?");
+-    expect(fixture.search).not.toHaveBeenCalled();
+-    expect(fixture.queue.getSession(hashSender(sender, config.senderHashSecret))?.session.currentIntent.cuisine).toBe("American");
++    expect(fixture.search).toHaveBeenCalledOnce();
++    expect(fixture.search).toHaveBeenCalledWith(expect.objectContaining({ cuisine: cuisine.toLowerCase(), dish: null, orderableOnly: true }));
++    expect(response.text).not.toMatch(/what are you looking for|tacos, burgers, or pizza/i);
++  });
++
++  it("does not turn a named merchant into a requested dish", () => {
++    const normalized = normalizeBroadFoodIntent({
++      ...intent,
++      query: "Sankranti Indian Kitchen",
++      food_type: "Sankranti Indian Kitchen",
++      cuisine: "indian",
++      dish: "Sankranti Indian Kitchen",
++      restaurant_name: "Sankranti Indian Kitchen",
++      restaurant_search_plan: { ...intent.restaurant_search_plan!, namedMerchant: "Sankranti Indian Kitchen" },
++    });
++
++    expect(normalized).toMatchObject({ restaurant_name: "Sankranti Indian Kitchen", cuisine: "indian", dish: null, food_type: null });
+@@ -2040,0 +2060,53 @@ describe("pickup intake conversation", () => {
++  it("waits for a slow successful named-merchant search instead of reporting a provider failure", async () => {
++    const merchant = "Sankranti Indian Kitchen";
++    const merchantCandidate: Candidate = {
++      ...candidate,
++      id: "dd:sankranti:atlanta",
++      restaurant: merchant,
++      restaurantName: merchant,
++      itemName: merchant,
++      storeId: "dd-sankranti-atlanta",
++      doorDashStoreId: "dd-sankranti-atlanta",
++      itemId: "dd-sankranti-atlanta",
++      source: "doordash",
++      sourceProviders: ["doordash"],
++      resultKind: "restaurant",
++      matchConfidence: 0.99,
++      address: "REDACTED TEST STORE ADDRESS",
++    };
++    const discoveryPlan = semanticPlanSchema.parse({
++      ...plan,
++      action: "search_places",
++      query: merchant,
++      interpretation: "Find the named restaurant.",
++      goalDisposition: "replace",
++      searchPlan: { ...plan.searchPlan!, intent: "action", cuisine: "indian", namedMerchant: merchant, queries: [merchant], brandStrategy: "named_merchant_first" },
++    });
++    const merchantIntent: Intent = {
++      ...intent,
++      query: merchant,
++      food_type: merchant,
++      cuisine: "indian",
++      dish: merchant,
++      restaurant_name: merchant,
++      restaurant_search_plan: { ...intent.restaurant_search_plan!, cuisine: "indian", namedMerchant: merchant, queries: [merchant], brandStrategy: "named_merchant_first" },
++    };
++    const fixture = service({ openNowCandidates: [merchantCandidate], agentStepPlan: () => discoveryPlan, extractIntent: () => merchantIntent });
++    const sender = "test-sender-3679";
++    const location = { displayLabel: "Atlanta 30332", postalCode: "30332", city: "Atlanta", state: "GA", latitude: 33.749, longitude: -84.388, source: "user_zip" as const };
++    fixture.queue.saveSession(hashSender(sender, config.senderHashSecret), sender, {
++      state: "awaiting_request", candidates: [], defaultLocation: location, currentLocation: location,
++      createdAt: Date.now(), latestRequestId: "slow-named-search", expiresAt: Date.now() + 60_000, active: false,
++    });
++    fixture.search.mockImplementation(async () => {
++      await new Promise((resolve) => setTimeout(resolve, 2_700));
++      return [merchantCandidate];
++    });
++
++    const response = await fixture.cloud.handle(sender, `I want ${merchant}`, { durableSessionId: conversationId, durableUserId: userId });
++
++    expect(fixture.search).toHaveBeenCalledOnce();
++    expect(response.text).not.toMatch(/temporarily unavailable|try again in a moment/i);
++    expect(response.recommendations?.[0]?.restaurantName).toBe(merchant);
++  });
++
+@@ -3124,0 +3197,162 @@ describe("pickup intake conversation", () => {
++  it.each(["delivery", "I want delivery", "actually can you deliver it?"])("adds the delivery fee and refreshes checkout without asking for an address: %s", async (message) => {
++    const fixture = service();
++    const sender = "test-sender-3901";
++    const options = { durableSessionId: conversationId, durableUserId: userId };
++    const key = hashSender(sender, config.senderHashSecret);
++
++    await fixture.cloud.handle(sender, "get me a spicy chicken sandwich from chick fil a for pickup", options);
++    const checkout = await fixture.cloud.handle(sender, "Miami 33131", options);
++    expect(checkout.text).toContain("Want delivery instead? Just say delivery.");
++    const checkoutSession = fixture.queue.getSession(key)!.session;
++    const before = checkoutSession.pendingOrder;
++    expect(checkoutSession.active).toBe(true);
++    expect(before.status).toBe("needs_input");
++    const originalDraft = before.pickupDraft as PickupOrderDraft;
++    const buildCalls = (fixture.catalog.buildCart as ReturnType<typeof vi.fn>).mock.calls.length;
++    fixture.createCheckoutSession.mockReset();
++    fixture.createCheckoutSession.mockResolvedValue({ id: "cs_test_delivery", url: "https://checkout.stripe.com/c/pay/delivery", paymentStatus: "unpaid" });
++    fixture.agentStep.mockClear();
++
++    const response = await fixture.cloud.handle(sender, message, options);
++    const afterSession = fixture.queue.getSession(key)!.session;
++    const after = afterSession.pendingOrder;
++
++    expect(response.text).toContain("Delivery fee: $5.00.");
++    expect(response.handoffUrl).toBe("https://checkout.stripe.com/c/pay/delivery");
++    expect(response.text).not.toMatch(/delivery address|restaurant or item/i);
++    expect(fixture.agentStep).not.toHaveBeenCalled();
++    expect(afterSession.taskWorkspace.foregroundTaskId).toBe(before.taskId);
++    expect(after).toMatchObject({ taskId: before.taskId, merchantQuery: before.merchantQuery, providerItemId: before.providerItemId, quantity: before.quantity, modifierSelections: before.modifierSelections });
++    expect(after.pickupDraft).toMatchObject({
++      id: originalDraft.id,
++      fulfillmentMode: "delivery",
++      deliveryFeeCents: 500,
++      manualDeliveryPending: true,
++      status: "AWAITING_PAYMENT",
++      paymentStatus: "checkout_created",
++      stripeCheckoutSessionId: "cs_test_delivery",
++      paymentUrl: "https://checkout.stripe.com/c/pay/delivery",
++      previewTotalCents: originalDraft.previewTotalCents,
++      previewTotalDisplay: originalDraft.previewTotalDisplay,
++      doorDashCartUuid: originalDraft.doorDashCartUuid,
++      items: originalDraft.items,
++    });
++    expect(after.pickupDraft.deliveryAddress).toBeUndefined();
++    expect(fixture.getPaymentStatus).toHaveBeenCalledWith(originalDraft.stripeCheckoutSessionId);
++    expect(fixture.expireCheckoutSession).toHaveBeenCalledWith(originalDraft.stripeCheckoutSessionId, expect.stringContaining("manual-delivery"));
++    expect((fixture.catalog.buildCart as ReturnType<typeof vi.fn>).mock.calls).toHaveLength(buildCalls);
++    expect(fixture.createCheckoutSession).toHaveBeenCalledWith(expect.objectContaining({ amountMinor: originalDraft.previewTotalCents, deliveryFeeMinor: 500, sentaFeeMinor: 50 }));
++
++    const repeated = await fixture.cloud.handle(sender, "delivery", options);
++    expect(repeated.handoffUrl).toBe("https://checkout.stripe.com/c/pay/delivery");
++    expect(fixture.createCheckoutSession).toHaveBeenCalledOnce();
++    expect(fixture.expireCheckoutSession).toHaveBeenCalledOnce();
++
++    const followup = await fixture.cloud.handle(sender, "What is it?", options);
++    expect(followup.text).not.toMatch(/delivery address/i);
++  });
++
++  it("does not ask for a delivery address before issuing the updated payment link", async () => {
++    const fixture = service();
++    const sender = "test-sender-3902";
++    const options = { durableSessionId: conversationId, durableUserId: userId };
++    const key = hashSender(sender, config.senderHashSecret);
++
++    await fixture.cloud.handle(sender, "get me a spicy chicken sandwich from chick fil a for pickup", options);
++    await fixture.cloud.handle(sender, "Miami 33131", options);
++    const checkout = fixture.queue.getSession(key)!.session.pendingOrder;
++    const response = await fixture.cloud.handle(sender, "I want delivery", options);
++    const after = fixture.queue.getSession(key)!.session.pendingOrder;
++
++    expect(response.text).toContain("Delivery fee: $5.00.");
++    expect(response.text).not.toMatch(/delivery address/i);
++    expect(after.pickupDraft).toMatchObject({ fulfillmentMode: "delivery", manualDeliveryPending: true, deliveryFeeCents: 500, stripeCheckoutSessionId: expect.any(String), paymentUrl: expect.stringContaining("checkout.stripe.com") });
++    expect(after.pickupDraft.items).toEqual(checkout.pickupDraft.items);
++    expect(after.pickupDraft.doorDashCartUuid).toBe(checkout.pickupDraft.doorDashCartUuid);
++    expect(fixture.createCheckoutSession).toHaveBeenCalledTimes(2);
++  });
++
++  it("lets forget my order cancel a manual delivery handoff and start the next order fresh", async () => {
++    const fixture = service({ merchantName: "Domino's" });
++    const sender = "test-sender-3931";
++    const options = { durableSessionId: conversationId, durableUserId: userId };
++    const key = hashSender(sender, config.senderHashSecret);
++
++    await fixture.cloud.handle(sender, "get me a spicy chicken sandwich from chick fil a for pickup", options);
++    await fixture.cloud.handle(sender, "Miami 33131", options);
++    await fixture.cloud.handle(sender, "delivery", options);
++    const manualDeliveryTask = fixture.queue.getSession(key)!.session.pendingOrder;
++
++    const cancelled = await fixture.cloud.handle(sender, "Forget my order", options);
++    const afterCancel = fixture.queue.getSession(key)!.session;
++    expect(cancelled.text).not.toMatch(/full delivery address/i);
++    expect(afterCancel.pendingOrder).toBeUndefined();
++    expect(afterCancel.taskWorkspace.foregroundTaskId).toBeUndefined();
++    expect(afterCancel.taskWorkspace.tasks.find((entry: { id: string }) => entry.id === manualDeliveryTask.taskId)?.checkoutTask).toMatchObject({ status: "cancelled", pickupDraft: { status: "CANCELLED", fulfillmentMode: "delivery", manualDeliveryPending: true } });
++
++    const next = await fixture.cloud.handle(sender, "I want Domino's", options);
++    const afterNext = fixture.queue.getSession(key)!.session;
++    expect(next.text).not.toMatch(/full delivery address/i);
++    expect(afterNext.pendingOrder?.merchantQuery).toBe("Domino's");
++    expect(afterNext.pendingOrder?.pickupDraft?.deliveryAddress).toBeUndefined();
++  });
++
++  it("keeps the pickup order unchanged when the old Stripe checkout cannot be expired", async () => {
++    const fixture = service();
++    const sender = "test-sender-3905";
++    const options = { durableSessionId: conversationId, durableUserId: userId };
++    const key = hashSender(sender, config.senderHashSecret);
++
++    await fixture.cloud.handle(sender, "get me a spicy chicken sandwich from chick fil a for pickup", options);
++    await fixture.cloud.handle(sender, "Miami 33131", options);
++    const before = fixture.queue.getSession(key)!.session.pendingOrder;
++    const oldDraft = before.pickupDraft as PickupOrderDraft;
++    fixture.expireCheckoutSession.mockRejectedValueOnce(new Error("Stripe unavailable"));
++
++    const response = await fixture.cloud.handle(sender, "delivery", options);
++    const after = fixture.queue.getSession(key)!.session.pendingOrder;
++
++    expect(response.text).toMatch(/couldn’t safely close.*left that order unchanged/i);
++    expect(after.pickupDraft).toMatchObject({ status: "AWAITING_PAYMENT", paymentStatus: "checkout_created", stripeCheckoutSessionId: oldDraft.stripeCheckoutSessionId, paymentUrl: oldDraft.paymentUrl, previewTotalCents: oldDraft.previewTotalCents });
++    expect(after.pickupDraft.fulfillmentMode).toBeUndefined();
++    expect(fixture.expireCheckoutSession).toHaveBeenCalledOnce();
++  });
++
++  it("keeps explicit merchant switching available after an unpaid checkout link", async () => {
++    const fixture = service({ merchantName: "Domino's" });
++    const sender = "test-sender-3903";
++    const options = { durableSessionId: conversationId, durableUserId: userId };
++    const key = hashSender(sender, config.senderHashSecret);
++
++    await fixture.cloud.handle(sender, "get me a spicy chicken sandwich from Domino's for pickup", options);
++    await fixture.cloud.handle(sender, "Miami 33131", options);
++    const response = await fixture.cloud.handle(sender, "Actually Taco Bell", options);
++
++    expect(response.text).not.toMatch(/send me the delivery address/i);
++    expect(fixture.queue.getSession(key)!.session.pendingOrder.merchantQuery).toBe("Taco Bell");
++  });
++
++  it("does not switch a paid pickup order to delivery", async () => {
++    const fixture = service();
++    const sender = "test-sender-3904";
++    const options = { durableSessionId: conversationId, durableUserId: userId };
++    const key = hashSender(sender, config.senderHashSecret);
++
++    await fixture.cloud.handle(sender, "get me a spicy chicken sandwich from chick fil a for pickup", options);
++    await fixture.cloud.handle(sender, "Miami 33131", options);
++    const stored = fixture.queue.getSession(key)!.session;
++    const task = stored.pendingOrder;
++    const paidDraft = pickupOrderDraftSchema.parse({ ...task.pickupDraft, status: "PAYMENT_CONFIRMED", paymentStatus: "paid" });
++    await fixture.drafts.save(paidDraft);
++    const paidTask = canonicalCheckoutTask({ ...task, pickupDraft: paidDraft, status: "active" });
++    fixture.queue.saveSession(key, sender, { ...stored, pendingOrder: paidTask, taskWorkspace: projectCheckoutTask(stored.taskWorkspace, paidTask) });
++    fixture.agentStep.mockClear();
++
++    const response = await fixture.cloud.handle(sender, "delivery", options);
++
++    expect(response.text).toMatch(/already paid.*can’t switch|already paid.*can't switch/i);
++    expect(fixture.agentStep).not.toHaveBeenCalled();
++    expect((await fixture.drafts.get(paidDraft.id))?.paymentStatus).toBe("paid");
++    expect(fixture.expireCheckoutSession).not.toHaveBeenCalled();
++  });
++
+@@ -3181 +3415 @@ describe("pickup intake conversation", () => {
+-  it.each(["remove bacon", "remove onions"])("does not treat '%s' as payment confirmation with an open session", async (editMessage) => {
++  it.each(["remove bacon", "remove onions", "forget this, can you get me 4 of them?"])("does not treat '%s' as payment confirmation with an open session", async (editMessage) => {
+@@ -3193 +3427 @@ describe("pickup intake conversation", () => {
+-    const modifyCart = vi.fn(async () => ({ cartUuid: "cart-dominos", cartSummary: { cartUuid: "cart-dominos", storeId: "dd-dominos", storeName: "Domino's", items: [{ name: "Chicken Bacon Ranch Sandwich", quantity: 1, options: ["No Bacon"] }] } }));
++    const modifyCart = vi.fn(async (_result: unknown, quantity: number) => ({ cartUuid: "cart-dominos", cartSummary: { cartUuid: "cart-dominos", storeId: "dd-dominos", storeName: "Domino's", items: [{ name: "Chicken Bacon Ranch Sandwich", quantity, options: [quantity === 4 ? "Bacon" : "No Bacon"] }] } }));
+@@ -3203 +3437 @@ describe("pickup intake conversation", () => {
+-    await fixture.cloud.handle(sender, "get me a chicken bacon ranch sandwich from chick fil a for pickup", options);
++    await fixture.cloud.handle(sender, "get me a chicken bacon ranch sandwich from Domino's for pickup", options);
+@@ -3220 +3454 @@ describe("pickup intake conversation", () => {
+-    } else {
++    } else if (editMessage === "remove onions") {
+@@ -3227,0 +3462,9 @@ describe("pickup intake conversation", () => {
++    } else {
++      expect(after).toMatchObject({ merchantQuery: "Domino's", itemQuery: "Chicken Bacon Ranch Sandwich", quantity: 4 });
++      expect(fixture.getPaymentStatus).toHaveBeenCalledWith("cs_test_old");
++      expect(fixture.expireCheckoutSession).toHaveBeenCalledWith("cs_test_old", expect.stringContaining("pickup-edit:"));
++      expect(modifyCart).toHaveBeenCalledOnce();
++      expect(modifyCart.mock.calls[0]?.[1]).toBe(4);
++      expect(after).toMatchObject({ merchantQuery: "Domino's", itemQuery: "Chicken Bacon Ranch Sandwich", quantity: 4, modifierSelections: [{ group: "Toppings", value: "Bacon" }] });
++      expect(after.pickupDraft?.stripeCheckoutSessionId).not.toBe("cs_test_old");
++      expect(after.pickupDraft?.paymentUrl).not.toBe(oldUrl);
+@@ -4782,2 +5025,2 @@ describe("pickup intake conversation", () => {
+-    expect(latestLookup).toMatchObject({ merchant: "Chipotle" });
+-    expect(saved).toMatchObject({ taskId: firstTaskId, merchantQuery: "Chipotle", resolvedStore: { name: "Chipotle" }, stage: "awaiting_items" });
++    expect(latestLookup).toMatchObject({ merchant: "Chipotle Mexican Grill" });
++    expect(saved).toMatchObject({ taskId: firstTaskId, merchantQuery: "Chipotle Mexican Grill", resolvedStore: { name: "Chipotle" }, stage: "awaiting_items" });
+@@ -4791,0 +5035,29 @@ describe("pickup intake conversation", () => {
++  it("treats a more specific canonical name as merchant refinement after a failed lookup", async () => {
++    const fixture = service({ catalogResult: { status: "store_not_found", alternatives: [], reason: "doordash_store_not_found" } });
++    const sender = "test-sender-3454";
++    const key = hashSender(sender, config.senderHashSecret);
++    const identity = { durableSessionId: conversationId, durableUserId: userId };
++    fixture.queue.saveSession(key, sender, {
++      state: "awaiting_request", candidates: [], createdAt: Date.now(), latestRequestId: "chipotle-refinement", expiresAt: Date.now() + 60_000, active: false,
++      defaultLocation: { displayLabel: "Atlanta 30332", postalCode: "30332", city: "Atlanta", state: "GA", latitude: 33.75, longitude: -84.39, source: "user_zip" },
++    });
++
++    const unavailable = await fixture.cloud.handle(sender, "I want Chipotle", identity);
++    expect(unavailable.text).toMatch(/Chipotle isn't available to order from/i);
++    const store = { id: "dd-chipotle-canonical", name: "Chipotle Mexican Grill", address: "REDACTED TEST STORE ADDRESS", latitude: 33.75, longitude: -84.39, orderingUrl: "https://www.doordash.com/store/chipotle", confidence: 0.99, evidence: ["verified_name"] };
++    const menuCandidate = { displayIndex: 1, providerItemId: "chipotle-bowl", providerMenuId: "chipotle-menu", name: "Burrito Bowl", priceCents: 1099, matchScore: 1 };
++    vi.mocked(fixture.catalog.shortlistNamedMerchant!).mockResolvedValueOnce({
++      status: "ready", store, menuId: "chipotle-menu", candidates: [menuCandidate], allCandidates: [menuCandidate], exactCandidate: null, retrievedAt: new Date().toISOString(),
++    });
++
++    const refined = await fixture.cloud.handle(sender, "Chipotle Mexican Grill", identity);
++    const latestLookup = vi.mocked(fixture.catalog.shortlistNamedMerchant!).mock.calls.at(-1)?.[0];
++    const saved = fixture.queue.getSession(key)!.session.pendingOrder;
++
++    expect(latestLookup).toMatchObject({ merchant: "Chipotle Mexican Grill" });
++    expect(saved).toMatchObject({ merchantQuery: "Chipotle Mexican Grill", resolvedStore: { name: "Chipotle Mexican Grill" }, stage: "awaiting_items" });
++    expect(refined.text).not.toMatch(/couldn't find that item|looking for.*menu/i);
++    expect(fixture.search).not.toHaveBeenCalled();
++    expect(fixture.createCheckoutSession).not.toHaveBeenCalled();
++  });
++
+@@ -5333,0 +5606,5 @@ describe("pickup intake conversation", () => {
++
++      const reframed = await fixture.cloud.handle(sender, "forget this, can you get me 4 of them?", { durableSessionId: conversationId, durableUserId: userId });
++      const reframedTask = fixture.queue.getSession(key)!.session.pendingOrder;
++      expect(reframedTask).toMatchObject({ merchantQuery: "Taco Bell", itemQuery: "Bean Burrito", providerItemId: "bean-burrito", quantity: 4, providerRequiredGroups: requiredGroups });
++      expect(reframed.text).toMatch(/Got it, 4 Bean Burritos/);
+diff --git a/tests/pickupIntakeWorker.test.ts b/tests/pickupIntakeWorker.test.ts
+index 6f054b5..c77a495 100644
+--- a/tests/pickupIntakeWorker.test.ts
++++ b/tests/pickupIntakeWorker.test.ts
+@@ -94 +94 @@ describe("PickupIntakeWorker", () => {
+-    expect(confirmed).toMatchObject({ status: "awaiting_payment", paymentUrl: "https://checkout.stripe.com/c/pay/india-eats", draft: { cartUserConfirmed: true, pendingCartConfirmation: undefined, cartConfirmation: { cartUuid: "india-eats-cart", status: "confirmed" }, status: "AWAITING_PAYMENT", stripeCheckoutSessionId: "cs_test_india_eats" } });
++    expect(confirmed).toMatchObject({ status: "awaiting_payment", paymentUrl: "https://checkout.stripe.com/c/pay/india-eats", draft: { cartUserConfirmed: true, pendingCartConfirmation: undefined, cartConfirmation: { cartUuid: "india-eats-cart", status: "confirmed" }, status: "AWAITING_PAYMENT", stripeCheckoutSessionId: "cs_test_india_eats", sentaFeeCents: 50 } });
+@@ -98,0 +99 @@ describe("PickupIntakeWorker", () => {
++    expect(stripe.createCheckoutSession).toHaveBeenCalledWith(expect.objectContaining({ amountMinor: 1599, sentaFeeMinor: 50 }));
+diff --git a/tests/pickupPaymentService.test.ts b/tests/pickupPaymentService.test.ts
+index 8d03e1e..5947f17 100644
+--- a/tests/pickupPaymentService.test.ts
++++ b/tests/pickupPaymentService.test.ts
+@@ -205,0 +206,33 @@ describe("PickupPaymentService", () => {
++  it("validates and records the order quote plus the Senta service fee", async () => {
++    const store = new MemoryPickupOrderDraftStore();
++    const draft = pickupDraft({ status: "AWAITING_PAYMENT", stripeCheckoutSessionId: "cs_pickup", paymentUrl: "https://checkout.stripe.com/c/pay/pickup", paymentStatus: "checkout_created", sentaFeeCents: 50 });
++    await store.save(draft);
++    const notify = vi.fn(async () => undefined);
++    const service = new PickupPaymentService(store, notify);
++    const event = paidEvent(draft, { amountTotal: 899, metadata: { ...paidEvent(draft).metadata, senta_fee_cents: "50" } });
++    await expect(service.consume(event)).resolves.toBe(true);
++    const settled = await store.get(draft.id);
++    expect(settled).toMatchObject({ status: "READY_FOR_FULFILLMENT", stripeAmountTotalCents: 899, stripeDiscountCents: 0, sentaFeeCents: 50 });
++    expect(pickupOperatorMessage(settled!)).toContain("Senta service fee: $0.50");
++  });
++
++  it("validates and records a $5 delivery fee separately from the Senta fee", async () => {
++    const store = new MemoryPickupOrderDraftStore();
++    const base = pickupDraft({ status: "AWAITING_PAYMENT", stripeCheckoutSessionId: "cs_delivery", paymentUrl: "https://checkout.stripe.com/c/pay/delivery", paymentStatus: "checkout_created", sentaFeeCents: 50 });
++    const draft = pickupOrderDraftSchema.parse({ ...base, fulfillmentMode: "delivery", manualDeliveryPending: true, deliveryFeeCents: 500, deliveryAddress: "REDACTED TEST DELIVERY ADDRESS" });
++    await store.save(draft);
++    const event = paidEvent(draft, { checkoutSessionId: "cs_delivery", amountTotal: draft.previewTotalCents! + 550, metadata: { ...paidEvent(draft).metadata, senta_fee_cents: "50", delivery_fee_cents: "500" } });
++
++    await expect(new PickupPaymentService(store, async () => undefined).consume(event)).resolves.toBe(true);
++    expect(await store.get(draft.id)).toMatchObject({ paymentStatus: "paid", deliveryFeeCents: 500, sentaFeeCents: 50, stripeAmountTotalCents: draft.previewTotalCents! + 550 });
++  });
++
++  it("rejects a payment that omits the stored Senta fee", async () => {
++    const store = new MemoryPickupOrderDraftStore();
++    const draft = pickupDraft({ status: "AWAITING_PAYMENT", stripeCheckoutSessionId: "cs_pickup", paymentUrl: "https://checkout.stripe.com/c/pay/pickup", paymentStatus: "checkout_created", sentaFeeCents: 50 });
++    await store.save(draft);
++    const event = paidEvent(draft, { amountTotal: 849, metadata: { ...paidEvent(draft).metadata, senta_fee_cents: "50" } });
++    await expect(new PickupPaymentService(store).consume(event)).rejects.toThrow("pickup_payment_amount_mismatch");
++    expect((await store.get(draft.id))?.paymentStatus).toBe("checkout_created");
++  });
++
+diff --git a/tests/pickupPaymentUx.test.ts b/tests/pickupPaymentUx.test.ts
+index f38416c..f77647a 100644
+--- a/tests/pickupPaymentUx.test.ts
++++ b/tests/pickupPaymentUx.test.ts
+@@ -33,0 +34,21 @@ describe("paid pickup payment response UX", () => {
++  it("shows the Senta fee and fee-inclusive total before the Checkout link", () => {
++    const feeDraft = pickupOrderDraftSchema.parse({ ...draft(), sentaFeeCents: 50 });
++    const response = pickupPaymentResponse(feeDraft, "https://checkout.stripe.com/c/pay/test");
++    expect(response.text).toContain("Senta fee: $0.50");
++    expect(response.text).toContain("Total is $4.29.");
++    expect(response.responseEnvelope?.messages[0]?.content).toContain("Senta fee: $0.50");
++    expect(response.pickupPaymentLinkAlert?.totalCents).toBe(429);
++    expect(response.pickupPaymentLinkAlert?.sentaFeeCents).toBe(50);
++  });
++
++  it("shows a delivery fee separately on a fresh delivery checkout", () => {
++    const deliveryDraft = pickupOrderDraftSchema.parse({ ...draft(), status: "AWAITING_PAYMENT", paymentStatus: "checkout_created", stripeCheckoutSessionId: "cs_delivery", fulfillmentMode: "delivery", manualDeliveryPending: false, deliveryAddress: "REDACTED TEST DELIVERY ADDRESS", deliveryFeeCents: 500, sentaFeeCents: 50 });
++    const response = pickupPaymentResponse(deliveryDraft, "https://checkout.stripe.com/c/pay/delivery");
++
++    expect(response.text).toContain("Delivery to REDACTED TEST DELIVERY ADDRESS.");
++    expect(response.text).toContain("Delivery fee: $5.00.");
++    expect(response.text).toContain("Senta fee: $0.50.");
++    expect(response.text).toContain("Total is $9.29.");
++    expect(response.pickupPaymentLinkAlert).toMatchObject({ totalCents: 929, providerTotalCents: 379, deliveryFeeCents: 500, sentaFeeCents: 50 });
++  });
++
+diff --git a/tests/searchResultBoundary.test.ts b/tests/searchResultBoundary.test.ts
+index 62fcc56..939d172 100644
+--- a/tests/searchResultBoundary.test.ts
++++ b/tests/searchResultBoundary.test.ts
+@@ -76,0 +77,43 @@ describe("live DoorDash search-result boundary", () => {
++  it("browses only the exact named merchant menu and ignores unrelated returned stores", async () => {
++    const commands: Array<{ command: string; storeId?: string }> = [];
++    vi.mocked(spawn).mockImplementation(((_path: string, argv: string[]) => {
++      const command = argv.find((value) => ["search", "menu", "restaurant-item-details"].includes(value)) ?? "unknown";
++      const storeIdIndex = argv.indexOf("--store-id");
++      const storeId = storeIdIndex >= 0 ? argv[storeIdIndex + 1] : undefined;
++      commands.push({ command, ...(storeId ? { storeId } : {}) });
++      const value = command === "search"
++        ? { structuredContent: { stores: [
++            { store_id: "sankranti", name: "Sankranti Indian Kitchen", verified_name: "Sankranti Indian Kitchen" },
++            { store_id: "unrelated-1", name: "Indian Bowl House" },
++            { store_id: "unrelated-2", name: "Curry Garden" },
++            { store_id: "unrelated-3", name: "Bombay Cafe" },
++            { store_id: "unrelated-4", name: "Delhi Palace" },
++          ] } }
++        : command === "menu"
++          ? { structuredContent: { menu_id: "menu-sankranti", items: Array.from({ length: 12 }, (_, index) => ({ item_id: `item-${index + 1}`, name: `Sankranti Dish ${index + 1}`, price: 12.99 })) } }
++          : { structuredContent: { description: "Provider-verified Chicken 65", web_url: "https://www.doordash.com/store/sankranti/chicken-65" } };
++      const child = childFor(value);
++      queueMicrotask(() => { child.stdout.emit("data", Buffer.from(JSON.stringify(value))); child.emit("close", 0); });
++      return child as never;
++    }) as never);
++
++    const merchantIntent: ParsedIntent = {
++      ...intent("Sankranti Indian Kitchen", "Sankranti Indian Kitchen"),
++      queryVariants: ["Sankranti Indian Kitchen", "Sankranti Indian Kitchen restaurant", "Indian restaurants"],
++      restaurantName: "Sankranti Indian Kitchen",
++      cuisine: "indian",
++      dish: null,
++      foodType: undefined,
++    };
++
++    const candidates = await new LiveDoorDashAdapter().searchCandidates(merchantIntent);
++
++    expect(candidates).toHaveLength(3);
++    expect(candidates[0]).toMatchObject({ storeId: "sankranti", restaurantName: "Sankranti Indian Kitchen", itemName: "Sankranti Dish 1" });
++    expect(commands).toHaveLength(5);
++    expect(commands.filter(({ command }) => command === "search")).toHaveLength(1);
++    expect(commands.filter(({ command }) => command === "menu")).toEqual([{ command: "menu", storeId: "sankranti" }]);
++    expect(commands.filter(({ command }) => command === "restaurant-item-details")).toHaveLength(3);
++    expect(commands.every(({ storeId }) => !storeId || storeId === "sankranti")).toBe(true);
++  });
++
+diff --git a/tests/stripePaymentProvider.test.ts b/tests/stripePaymentProvider.test.ts
+index be19e21..33dd55a 100644
+--- a/tests/stripePaymentProvider.test.ts
++++ b/tests/stripePaymentProvider.test.ts
+@@ -16,0 +17,23 @@ describe("Stripe payment provider", () => {
++  it("shows the fixed Senta fee as a separate Checkout line item", async () => {
++    const request = vi.fn(async () => new Response(JSON.stringify({ id: "cs_test_fee", url: "https://checkout.stripe.com/c/pay/fee", payment_status: "unpaid" }), { status: 200 }));
++    const provider = new StripePaymentProvider("test-secret-placeholder", "test-webhook-secret-placeholder", request as typeof fetch);
++    await provider.createCheckoutSession({ orderSessionId: "order-fee", cartRevision: 1, quoteId: "quote-fee", amountMinor: 1299, sentaFeeMinor: 50, currency: "USD", description: "Demo bowl", expiresAt: new Date(Date.now() + 31 * 60_000).toISOString(), successUrl: "https://example.com/return", cancelUrl: "https://example.com/cancel", idempotencyKey: "fee-1" });
++    const body = (request.mock.calls[0] as unknown as [string, RequestInit])[1].body as URLSearchParams;
++    expect(body.get("line_items[0][price_data][unit_amount]")).toBe("1299");
++    expect(body.get("line_items[0][price_data][product_data][name]")).toBe("Demo bowl");
++    expect(body.get("line_items[1][price_data][unit_amount]")).toBe("50");
++    expect(body.get("line_items[1][price_data][product_data][name]")).toBe("Senta service fee");
++  });
++
++  it("adds delivery and Senta fees as separate Checkout line items", async () => {
++    const request = vi.fn(async () => new Response(JSON.stringify({ id: "cs_test_delivery_fee", url: "https://checkout.stripe.com/c/pay/delivery-fee", payment_status: "unpaid" }), { status: 200 }));
++    const provider = new StripePaymentProvider("test-secret-placeholder", "test-webhook-secret-placeholder", request as typeof fetch);
++    await provider.createCheckoutSession({ orderSessionId: "order-delivery-fee", cartRevision: 2, quoteId: "quote-delivery-fee", amountMinor: 1299, deliveryFeeMinor: 500, sentaFeeMinor: 50, currency: "USD", description: "Demo bowl", expiresAt: new Date(Date.now() + 31 * 60_000).toISOString(), successUrl: "https://example.com/return", cancelUrl: "https://example.com/cancel", idempotencyKey: "delivery-fee-1" });
++    const body = (request.mock.calls[0] as unknown as [string, RequestInit])[1].body as URLSearchParams;
++    expect(body.get("line_items[0][price_data][unit_amount]")).toBe("1299");
++    expect(body.get("line_items[1][price_data][unit_amount]")).toBe("500");
++    expect(body.get("line_items[1][price_data][product_data][name]")).toBe("Delivery fee");
++    expect(body.get("line_items[2][price_data][unit_amount]")).toBe("50");
++    expect(body.get("line_items[2][price_data][product_data][name]")).toBe("Senta service fee");
++  });
++
