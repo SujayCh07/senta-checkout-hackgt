@@ -79,7 +79,12 @@ h1, h2 { margin: 0; font-family: inherit; letter-spacing: -1.6px; }
 .cart-item strong, .item-modifier { display: block; }
 .cart-item strong { font-size: 12px; }
 .item-modifier { margin-top: 5px; color: var(--muted); font-size: 10px; }
-.item-quantity { flex: none; color: var(--muted); font-size: 11px; }
+.cart-line-controls { display: flex; align-items: center; gap: 5px; flex: none; }
+.item-quantity { min-width: 18px; color: var(--muted); font-size: 11px; text-align: center; }
+.cart-action { min-width: 25px; height: 25px; padding: 0 5px; border: 1px solid var(--line); border-radius: 7px; background: white; color: var(--ink); font-size: 12px; }
+.cart-action:hover:not(:disabled) { border-color: #a9b9a3; color: var(--green); }
+.cart-action:disabled { cursor: not-allowed; opacity: .42; }
+.cart-action.cart-remove { margin-left: 3px; padding: 0 7px; color: var(--muted); font-size: 9px; }
 .price-row, .price-total { display: flex; align-items: center; justify-content: space-between; font-size: 11px; }
 .price-row { padding: 8px 0; }
 .price-row strong { font-weight: 600; }

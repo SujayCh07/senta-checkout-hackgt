@@ -16,6 +16,7 @@ let conversationId;
 let currentOrder;
 let checkoutConfigured = false;
 let resumeCheckoutUrl = null;
+let cartMutationPending = false;
 
 function money(cents, currency = 'USD') {
   return new Intl.NumberFormat(undefined, { style: 'currency', currency }).format(cents / 100);
@@ -61,10 +62,21 @@ function renderCart(result) {
     options.className = 'item-modifier';
     options.textContent = line.modifiers.length ? line.modifiers.map((modifier) => modifier.name).join(', ') : 'No additional options';
     details.append(name, options);
+    const controls = document.createElement('div');
+    controls.className = 'cart-line-controls';
+    const editable = order.status === 'ready' && !cartMutationPending;
+    const decrease = createCartButton('Decrease quantity', '−', () => updateCartLine(line, line.quantity - 1));
+    decrease.disabled = !editable || line.quantity <= 1;
     const quantity = document.createElement('span');
     quantity.className = 'item-quantity';
-    quantity.textContent = `× ${line.quantity}`;
-    row.append(details, quantity);
+    quantity.textContent = String(line.quantity);
+    const increase = createCartButton('Increase quantity', '+', () => updateCartLine(line, line.quantity + 1));
+    increase.disabled = !editable || line.quantity >= 20;
+    const remove = createCartButton(`Remove ${line.item.name}`, 'Remove', () => removeCartLine(line));
+    remove.classList.add('cart-remove');
+    remove.disabled = !editable;
+    controls.append(decrease, quantity, increase, remove);
+    row.append(details, controls);
     cartItems.append(row);
   }
   document.querySelector('#subtotal').textContent = money(order.subtotalCents, order.currency);
@@ -76,6 +88,54 @@ function renderCart(result) {
   resumeCheckoutUrl = null;
   checkoutButton.textContent = order.status === 'payment_unknown' ? 'Reconcile checkout' : 'Continue to Stripe Checkout ↗';
   document.querySelector('#conversation-status').textContent = `Order revision ${order.revision}`;
+}
+
+function createCartButton(label, text, onClick) {
+  const button = document.createElement('button');
+  button.type = 'button';
+  button.className = 'cart-action';
+  button.setAttribute('aria-label', label);
+  button.textContent = text;
+  button.addEventListener('click', onClick);
+  return button;
+}
+
+async function mutateCart(path, method, body) {
+  if (!currentOrder || cartMutationPending) return;
+  const conversationAtStart = conversationId;
+  cartMutationPending = true;
+  renderCart({ order: currentOrder });
+  try {
+    const order = await request(path, { method, body: { ...body, expectedRevision: currentOrder.revision } });
+    if (order) {
+      renderCart({ order });
+      document.querySelector('#conversation-status').textContent = `Order revision ${order.revision}`;
+    } else {
+      currentOrder = null;
+      renderCart({ order: null });
+      document.querySelector('#conversation-status').textContent = 'Cart cleared. Choose an item to start another order.';
+    }
+  } catch (error) {
+    document.querySelector('#order-state').textContent = error.message;
+    if (error.status === 409 && conversationAtStart === conversationId) {
+      try {
+        const refreshed = await request(`/api/conversations/${encodeURIComponent(conversationId)}`);
+        renderCart(refreshed);
+      } catch { /* Keep the conflict visible if the refresh also fails. */ }
+    }
+  } finally {
+    cartMutationPending = false;
+    if (currentOrder) renderCart({ order: currentOrder });
+  }
+}
+
+function updateCartLine(line, quantity) {
+  if (quantity < 1 || quantity > 20) return;
+  return mutateCart(`/api/orders/${currentOrder.id}/items/${line.id}`, 'PATCH', { quantity });
+}
+
+function removeCartLine(line) {
+  return mutateCart(`/api/orders/${currentOrder.id}/items/${line.id}`, 'DELETE', {});
 }
 
 async function createConversation() {
@@ -231,7 +291,10 @@ async function inspectCheckoutReturn() {
   if (!orderId || !location.pathname.startsWith('/checkout/')) return;
   try {
     const attempt = await request(`/api/orders/${encodeURIComponent(orderId)}/checkout`);
-    const message = attempt.status === 'paid'
+    const canceledReturn = location.pathname === '/checkout/cancel';
+    const message = canceledReturn
+      ? 'Checkout was canceled. Your cart is saved; you can resume payment when ready.'
+      : attempt.status === 'paid'
       ? 'Payment confirmed by the checkout provider.'
       : attempt.status === 'open'
         ? 'Checkout returned. Payment is still waiting for provider confirmation.'

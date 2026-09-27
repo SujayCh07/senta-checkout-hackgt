@@ -33,7 +33,7 @@ export function createStripeCheckoutProvider({
       body.set('metadata[order_revision]', String(order.revision));
       body.set('metadata[attempt_id]', attemptId);
       body.set('success_url', withCheckoutPlaceholder(successUrl, order.id));
-      body.set('cancel_url', cancelUrl);
+      body.set('cancel_url', withOrderReference(cancelUrl, order.id));
 
       let response;
       try {
@@ -105,6 +105,12 @@ function withCheckoutPlaceholder(value, orderId) {
   url.searchParams.set('session_id', '{CHECKOUT_SESSION_ID}');
   url.searchParams.set('order_id', orderId);
   return url.toString().replace('%7BCHECKOUT_SESSION_ID%7D', '{CHECKOUT_SESSION_ID}');
+}
+
+function withOrderReference(value, orderId) {
+  const url = new URL(value);
+  url.searchParams.set('order_id', orderId);
+  return url.toString();
 }
 
 function isStripeCheckoutUrl(value) {

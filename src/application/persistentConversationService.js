@@ -79,7 +79,8 @@ export function createPersistentConversationService({ conversations, orders, cat
     getConversation(userId, conversationId) {
       const conversation = conversations.findOwned(conversationId, userId);
       if (!conversation) throw codedError('not_found', 'Conversation was not found.');
-      const order = conversation.state.orderId ? orders.findOwned(conversation.state.orderId, userId) : null;
+      const savedOrder = conversation.state.orderId ? orders.findOwned(conversation.state.orderId, userId) : null;
+      const order = savedOrder?.status === 'canceled' ? null : savedOrder;
       return response(conversation, order, null);
     },
 
@@ -107,7 +108,8 @@ export function createPersistentConversationService({ conversations, orders, cat
       }
       const conversation = conversations.findOwned(conversationId, userId);
       if (!conversation) throw codedError('not_found', 'Conversation was not found.');
-      const currentOrder = conversation.state.orderId ? orders.findOwned(conversation.state.orderId, userId) : null;
+      const savedOrder = conversation.state.orderId ? orders.findOwned(conversation.state.orderId, userId) : null;
+      const currentOrder = savedOrder?.status === 'canceled' ? null : savedOrder;
       const currentIntentOrder = currentOrder ? {
         itemId: currentOrder.item.id,
         modifierIds: currentOrder.modifiers.map((modifier) => modifier.id),
