@@ -5,6 +5,11 @@ const STATUS_BY_CODE = new Map([
   ['invalid_credentials', 401], ['unauthenticated', 401], ['not_found', 404], ['invalid_message', 400],
   ['revision_conflict', 409], ['invalid_order', 422], ['payment_unavailable', 503],
   ['order_locked', 409], ['item_unavailable', 409],
+  ['attempt_conflict', 409], ['invalid_webhook_signature', 400], ['invalid_webhook', 400],
+  ['stripe_rejected', 502], ['ambiguous_checkout', 503],
+  ['rate_limited', 429], ['payment_unavailable', 503],
+  ['invalid_pagination', 400], ['invalid_cursor', 400],
+  ['price_changed', 409],
 ]);
 
 export function sendJson(response, status, payload, headers = {}) {

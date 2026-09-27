@@ -1,4 +1,3 @@
-import { calculateOrderTotals } from '../domain/cart.js';
 import { parseCatalogIntent } from '../domain/catalogIntent.js';
 
 const GREETING = 'Hi, I can help put together an order. Tell me a menu item and quantity, and I will keep the cart details together.';
@@ -10,6 +9,13 @@ export function createPersistentConversationService({ conversations, orders, cat
     if (!order) return null;
     const restaurants = catalog.listActive();
     const restaurant = restaurants.find((entry) => entry.id === order.restaurantId);
+    const lines = order.items.map((line) => ({
+      id: line.id,
+      item: { id: line.item.id, name: line.item.name, unitPriceCents: line.unitPriceCents },
+      quantity: line.quantity,
+      modifiers: line.modifiers,
+      lineTotalCents: line.lineTotalCents,
+    }));
     const item = catalog.findItem(order.item.id);
     return {
       id: order.id,
@@ -23,19 +29,24 @@ export function createPersistentConversationService({ conversations, orders, cat
       totalCents: order.totalCents,
       currency: order.currency,
       requiredOptions: item?.modifiers.filter((modifier) => modifier.required) ?? [],
+      items: lines,
     };
   }
 
   function cartView(order) {
     if (!order) return null;
-    const item = catalog.findItem(order.item.id);
-    if (!item) return null;
-    const totals = calculateOrderTotals(item, order.quantity, order.modifiers.map((modifier) => modifier.id));
     return {
-      currency: totals.currency,
-      lineItems: [{ itemId: item.id, name: item.name, quantity: order.quantity, unitPriceCents: totals.unitPriceCents, totalCents: totals.lineTotalCents, modifiers: totals.modifiers }],
-      subtotalCents: totals.subtotalCents,
-      totalCents: totals.totalCents,
+      currency: order.currency,
+      lineItems: order.items.map((line) => ({
+        itemId: line.item.id,
+        name: line.item.name,
+        quantity: line.quantity,
+        unitPriceCents: line.unitPriceCents,
+        totalCents: line.lineTotalCents,
+        modifiers: line.modifiers,
+      })),
+      subtotalCents: order.subtotalCents,
+      totalCents: order.totalCents,
       taxCents: null,
       deliveryFeeCents: null,
       pricingNote: 'Tax, delivery, and restaurant availability are not included in this checkout.',
@@ -72,6 +83,23 @@ export function createPersistentConversationService({ conversations, orders, cat
       return response(conversation, order, null);
     },
 
+    listConversations(userId, options) {
+      const page = conversations.listOwned(userId, options);
+      return {
+        ...page,
+        items: page.items.map((conversation) => {
+          const order = conversation.state.orderId ? orders.findOwned(conversation.state.orderId, userId) : null;
+          return {
+            id: conversation.id,
+            createdAt: conversation.createdAt,
+            updatedAt: conversation.updatedAt,
+            latestMessage: conversation.latestMessage,
+            order: order ? { id: order.id, status: order.status, totalCents: order.totalCents, currency: order.currency } : null,
+          };
+        }),
+      };
+    },
+
     sendMessage({ userId, conversationId, text }) {
       if (!userId) throw codedError('unauthenticated', 'Sign in is required.');
       if (typeof text !== 'string' || !text.trim() || text.trim().length > 2000) {
@@ -83,6 +111,7 @@ export function createPersistentConversationService({ conversations, orders, cat
       const currentIntentOrder = currentOrder ? {
         itemId: currentOrder.item.id,
         modifierIds: currentOrder.modifiers.map((modifier) => modifier.id),
+        lines: currentOrder.items.map((line) => ({ itemId: line.item.id, modifierIds: line.modifiers.map((modifier) => modifier.id) })),
       } : null;
       const catalogSnapshot = catalog.listActive();
       const intent = parseCatalogIntent(text.trim(), currentIntentOrder, catalogSnapshot);
@@ -109,6 +138,14 @@ export function createPersistentConversationService({ conversations, orders, cat
         }
       } else if (intent.type === 'invalid_quantity') {
         reply = 'Choose a quantity from 1 to 20.';
+      } else if (intent.type === 'add_item') {
+        const item = catalog.findItem(intent.itemId);
+        if (!currentOrder) reply = 'Tell me the menu item you want first.';
+        else if (!item) reply = 'That menu item is not currently available.';
+        else {
+          mutation = () => { nextOrder = orders.addItem({ userId, orderId: currentOrder.id, expectedRevision: currentOrder.revision, item, quantity: intent.quantity }); };
+          reply = `Added ${intent.quantity} × ${item.name} to your cart.`;
+        }
       } else if (intent.type === 'set_modifiers') {
         if (!currentOrder) reply = 'Tell me the menu item you want first.';
         else {

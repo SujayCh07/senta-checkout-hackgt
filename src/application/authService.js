@@ -2,6 +2,7 @@ import { createSessionToken, hashSessionToken } from '../infrastructure/sessions
 import { hashPassword, validatePassword, verifyPassword } from '../infrastructure/passwords.js';
 
 const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+const DUMMY_CREDENTIAL = { algorithm: 'scrypt', salt: '00'.repeat(16), hash: '00'.repeat(64) };
 
 export function normalizeEmail(value) {
   if (typeof value !== 'string') throw codedError('invalid_email', 'Enter a valid email address.');
@@ -10,7 +11,7 @@ export function normalizeEmail(value) {
   return email;
 }
 
-export function createAuthService({ users, sessions, now = Date.now }) {
+export function createAuthService({ users, sessions, now = Date.now, transaction = (work) => work() }) {
   if (!users || !sessions) throw new TypeError('User and session repositories are required');
 
   function issueSession(userId) {
@@ -28,27 +29,27 @@ export function createAuthService({ users, sessions, now = Date.now }) {
     register({ email: rawEmail, password }) {
       const email = normalizeEmail(rawEmail);
       validatePassword(password);
-      const existing = users.findByEmail(email);
-      if (existing) throw codedError('email_in_use', 'An account already exists for this email.');
       const credential = hashPassword(password);
-      let user;
       try {
-        user = users.create({ email, passwordSalt: credential.salt, passwordHash: credential.hash, createdAt: now() });
+        return transaction(() => {
+          if (users.findByEmail(email)) throw codedError('email_in_use', 'An account already exists for this email.');
+          const user = users.create({ email, passwordSalt: credential.salt, passwordHash: credential.hash, createdAt: now() });
+          const session = issueSession(user.id);
+          return { user: publicUser(user), session };
+        });
       } catch (error) {
         if (error.code === 'ERR_SQLITE_CONSTRAINT_UNIQUE') throw codedError('email_in_use', 'An account already exists for this email.');
         throw error;
       }
-      const session = issueSession(user.id);
-      return { user: publicUser(user), session };
     },
 
     login({ email: rawEmail, password }) {
       const email = normalizeEmail(rawEmail);
       const user = users.findByEmail(email);
-      const valid = verifyPassword(password, user && {
+      const valid = verifyPassword(password, user ? {
         algorithm: 'scrypt', salt: user.passwordSalt, hash: user.passwordHash,
-      });
-      if (!valid) throw codedError('invalid_credentials', 'Email or password is incorrect.');
+      } : DUMMY_CREDENTIAL);
+      if (!user || !valid) throw codedError('invalid_credentials', 'Email or password is incorrect.');
       return { user: publicUser(user), session: issueSession(user.id) };
     },
 

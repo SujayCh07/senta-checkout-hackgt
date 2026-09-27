@@ -24,6 +24,16 @@ export function createConversationRepository(db, { now = Date.now } = {}) {
     UPDATE conversations SET state_json = ?, updated_at = ?
     WHERE id = ? AND user_id = ? AND updated_at = ?
   `);
+  const listConversations = db.prepare(`
+    SELECT c.id, c.created_at AS createdAt, c.updated_at AS updatedAt,
+           c.state_json AS stateJson,
+           (SELECT content FROM messages m WHERE m.conversation_id = c.id ORDER BY sequence DESC LIMIT 1) AS latestMessage
+    FROM conversations c
+    WHERE c.user_id = ?
+      AND (? IS NULL OR c.updated_at < ? OR (c.updated_at = ? AND c.id < ?))
+    ORDER BY c.updated_at DESC, c.id DESC
+    LIMIT ?
+  `);
 
   function hydrate(row) {
     if (!row) return null;
@@ -42,6 +52,20 @@ export function createConversationRepository(db, { now = Date.now } = {}) {
       return hydrate(getConversation.get(id, userId));
     },
     findOwned(id, userId) { return hydrate(getConversation.get(id, userId)); },
+    listOwned(userId, { limit = 20, cursor = null } = {}) {
+      if (!Number.isInteger(limit) || limit < 1 || limit > 100) throw codedError('invalid_pagination', 'History limit must be between 1 and 100.');
+      const position = cursor ? decodeCursor(cursor) : null;
+      const rows = listConversations.all(userId, position?.updatedAt ?? null, position?.updatedAt ?? null,
+        position?.updatedAt ?? null, position?.id ?? null, limit + 1);
+      const hasMore = rows.length > limit;
+      const page = rows.slice(0, limit).map((row) => {
+        let state;
+        try { state = JSON.parse(row.stateJson); } catch { throw new Error(`Conversation ${row.id} has invalid stored state`); }
+        return { id: row.id, state, createdAt: row.createdAt, updatedAt: row.updatedAt, latestMessage: row.latestMessage ?? '' };
+      });
+      const last = page.at(-1);
+      return { items: page, hasMore, nextCursor: hasMore && last ? encodeCursor(last) : null };
+    },
     appendTurn({ id, userId, expectedUpdatedAt, userText, assistantText, state, persist = () => {} }) {
       return withTransaction(db, () => {
         const current = getConversation.get(id, userId);
@@ -63,4 +87,18 @@ export function createConversationRepository(db, { now = Date.now } = {}) {
 
 function codedError(code, message) {
   return Object.assign(new Error(message), { code });
+}
+
+function encodeCursor(row) {
+  return Buffer.from(JSON.stringify({ updatedAt: row.updatedAt, id: row.id }), 'utf8').toString('base64url');
+}
+
+function decodeCursor(value) {
+  try {
+    const cursor = JSON.parse(Buffer.from(value, 'base64url').toString('utf8'));
+    if (!Number.isSafeInteger(cursor.updatedAt) || typeof cursor.id !== 'string' || !cursor.id) throw new Error('invalid');
+    return cursor;
+  } catch {
+    throw codedError('invalid_cursor', 'Conversation history cursor is invalid.');
+  }
 }

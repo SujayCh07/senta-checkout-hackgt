@@ -25,6 +25,9 @@ export function withTransaction(db, work) {
   if (!db || typeof db.exec !== 'function' || typeof work !== 'function') {
     throw new TypeError('withTransaction requires a database and callback');
   }
+  if (work.constructor?.name === 'AsyncFunction') {
+    throw new TypeError('SQLite transaction callbacks must be synchronous');
+  }
   if (activeTransactions.has(db)) return work();
   db.exec('BEGIN IMMEDIATE');
   activeTransactions.add(db);

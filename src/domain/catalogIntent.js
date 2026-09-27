@@ -23,6 +23,7 @@ export function parseCatalogIntent(text, currentOrder = null, restaurants = []) 
   }
 
   const match = findMentionedItem(normalized, restaurants);
+  if (match && currentOrder) return { type: 'add_item', itemId: match.id, quantity: quantity ?? 1 };
   if (match) return { type: 'start_order', itemId: match.id, quantity: quantity ?? 1 };
   return { type: 'unknown' };
 }
@@ -31,7 +32,7 @@ function parseModifier(text, item, selectedIds) {
   if (!item?.modifiers?.length) return null;
   const modifier = [...item.modifiers]
     .sort((left, right) => right.name.length - left.name.length)
-    .find((option) => includesPhrase(text, normalize(option.name)));
+    .find((option) => includesPhrase(text, normalize(option.name).replace(/^(add|extra|include)\s+/, '')));
   if (!modifier) return null;
   const selected = new Set(selectedIds);
   if (/\b(no|remove|without|skip)\b/.test(text)) selected.delete(modifier.id);
@@ -62,5 +63,5 @@ function readQuantity(text) {
   const wordPattern = [...NUMBER_WORDS.keys()].sort((a, b) => b.length - a.length).join('|');
   const match = text.match(new RegExp(`\\b(\\d+|${wordPattern})\\b`));
   if (!match) return null;
-  return Number(match[1]) || NUMBER_WORDS.get(match[1]) || null;
+  return /^\d+$/.test(match[1]) ? Number(match[1]) : NUMBER_WORDS.get(match[1]) ?? null;
 }

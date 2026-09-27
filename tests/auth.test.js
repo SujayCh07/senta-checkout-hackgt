@@ -4,12 +4,13 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 import { createAuthService } from '../src/application/authService.js';
-import { openDatabase } from '../src/infrastructure/database.js';
+import { openDatabase, withTransaction } from '../src/infrastructure/database.js';
 import { runMigrations } from '../src/infrastructure/migrate.js';
 import { createSessionToken } from '../src/infrastructure/sessions.js';
 import { hashPassword, verifyPassword } from '../src/infrastructure/passwords.js';
 import { createSessionRepository } from '../src/persistence/sessionRepository.js';
 import { createUserRepository } from '../src/persistence/userRepository.js';
+import { normalizeEmail } from '../src/application/authService.js';
 
 async function fixture(t, now = 1_800_000_000_000) {
   const directory = await mkdtemp(join(tmpdir(), 'senta-auth-'));
@@ -25,6 +26,15 @@ test('scrypt password credentials verify without storing the original password',
   assert.notEqual(credential.hash, 'correct horse battery staple');
   assert.equal(verifyPassword('correct horse battery staple', credential), true);
   assert.equal(verifyPassword('incorrect password', credential), false);
+});
+
+test('password and email boundaries normalize input and reject short or malformed values', () => {
+  assert.throws(() => hashPassword('short'), { code: 'invalid_password' });
+  assert.throws(() => hashPassword('x'.repeat(1025)), { code: 'invalid_password' });
+  assert.equal(normalizeEmail('  Person@Example.Test  '), 'person@example.test');
+  for (const email of ['', 'not-an-email', 'two@@example.test', 'a'.repeat(255) + '@example.test']) {
+    assert.throws(() => normalizeEmail(email), { code: 'invalid_email' });
+  }
 });
 
 test('session token is random and only its digest is stored', () => {
@@ -57,6 +67,20 @@ test('sessions persist only token hashes and expire or revoke cleanly', async (t
   assert.equal(expired.current(session.rawToken), null);
   service.logout(session.rawToken);
   assert.equal(service.current(session.rawToken), null);
+});
+
+test('account registration rolls back the account when session creation fails', async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), 'senta-auth-atomic-'));
+  const db = openDatabase({ path: join(directory, 'atomic.sqlite') });
+  t.after(async () => { db.close(); await rm(directory, { recursive: true, force: true }); });
+  runMigrations(db);
+  const service = createAuthService({
+    users: createUserRepository(db),
+    sessions: { create() { throw new Error('session storage unavailable'); } },
+    transaction: (work) => withTransaction(db, work),
+  });
+  assert.throws(() => service.register({ email: 'atomic@example.test', password: 'a long secure password' }), /session storage unavailable/);
+  assert.equal(db.prepare('SELECT COUNT(*) AS count FROM users').get().count, 0);
 });
 
 test('cookie parsing rejects malformed and duplicate session cookies', async () => {

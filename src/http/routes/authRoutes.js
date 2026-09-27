@@ -1,8 +1,10 @@
 import { authenticateRequest, assertCsrf, assertSameOrigin, readSessionToken, sessionCookie } from '../security.js';
 import { readJsonBody } from '../body.js';
 import { sendError, sendJson } from '../responses.js';
+import { createFixedWindowLimiter } from '../rateLimiter.js';
 
-export function createAuthRoutes({ authService, cookieName = 'senta_session', secureCookies = false }) {
+export function createAuthRoutes({ authService, cookieName = 'senta_session', secureCookies = false, expectedOrigin = null }) {
+  const loginLimiter = createFixedWindowLimiter({ limit: 12, windowMs: 15 * 60 * 1000, maxKeys: 5000 });
   return async function handleAuthRoute(request, response, url) {
     const route = `${request.method} ${url.pathname}`;
     if (!['GET /api/auth/me', 'POST /api/auth/register', 'POST /api/auth/login', 'POST /api/auth/logout'].includes(route)) {
@@ -14,7 +16,7 @@ export function createAuthRoutes({ authService, cookieName = 'senta_session', se
     }
 
     try {
-      if (request.method === 'POST') assertRequestOrigin(request);
+      if (request.method === 'POST') assertRequestOrigin(request, expectedOrigin);
       if (route === 'GET /api/auth/me') {
         const account = authenticateRequest(request, authService, cookieName);
         sendJson(response, account ? 200 : 401, account ? { user: publicUser(account), csrfToken: account.csrfToken } : { error: 'Sign in is required.', code: 'unauthenticated' });
@@ -22,6 +24,8 @@ export function createAuthRoutes({ authService, cookieName = 'senta_session', se
       }
 
       if (route === 'POST /api/auth/register' || route === 'POST /api/auth/login') {
+        const limit = loginLimiter.consume(request.socket?.remoteAddress ?? 'unknown');
+        if (!limit.allowed) throw Object.assign(new Error('Too many sign-in attempts. Try again in a few minutes.'), { code: 'rate_limited' });
         const body = await readJsonBody(request);
         const result = route.endsWith('/register')
           ? authService.register({ email: body.email, password: body.password })
@@ -52,10 +56,10 @@ export function createAuthRoutes({ authService, cookieName = 'senta_session', se
   };
 }
 
-function assertRequestOrigin(request) {
+function assertRequestOrigin(request, configuredOrigin) {
   const origin = request.headers.origin;
   if (!origin) throw Object.assign(new Error('Request origin is not allowed.'), { code: 'origin_rejected' });
-  const expected = `${request.socket?.encrypted ? 'https' : 'http'}://${request.headers.host}`;
+  const expected = configuredOrigin || `${request.socket?.encrypted ? 'https' : 'http'}://${request.headers.host}`;
   assertSameOrigin(request, expected);
 }
 

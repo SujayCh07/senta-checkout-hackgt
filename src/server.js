@@ -7,6 +7,7 @@ import { loadConfig } from './config.js';
 import { sendError, sendJson } from './http/responses.js';
 import { createConversationRoutes } from './http/routes/conversationRoutes.js';
 import { createOrderRoutes } from './http/routes/orderRoutes.js';
+import { createCatalogRoutes } from './http/routes/catalogRoutes.js';
 
 const here = fileURLToPath(new URL('.', import.meta.url));
 const publicDirectory = resolve(here, '../public');
@@ -16,7 +17,9 @@ const contentTypes = new Map([
   ['.css', 'text/css; charset=utf-8'],
 ]);
 async function sendStatic(response, pathname) {
-  const requestedPath = pathname === '/' ? 'index.html' : decodeURIComponent(pathname.slice(1));
+  const requestedPath = pathname === '/' || pathname.startsWith('/checkout/')
+    ? 'index.html'
+    : decodeURIComponent(pathname.slice(1));
   const allowedFiles = new Set(['index.html', 'app.js', 'auth.js', 'styles.css']);
   if (!allowedFiles.has(requestedPath)) {
     response.writeHead(404).end('Not found');
@@ -33,13 +36,15 @@ async function sendStatic(response, pathname) {
   }
 }
 
-export function createSentaDemoServer({ runtime = null } = {}) {
+export function createSentaServer({ runtime = null } = {}) {
   const authRoutes = runtime?.authRoutes;
   const conversationRoutes = runtime && createConversationRoutes({
     conversations: runtime.conversationService,
     authService: runtime.authService,
+    expectedOrigin: runtime.config.publicOrigin,
   });
-  const orderRoutes = runtime && createOrderRoutes({ orders: runtime.orders, authService: runtime.authService });
+  const orderRoutes = runtime && createOrderRoutes({ orders: runtime.orderService, authService: runtime.authService, checkoutService: runtime.checkoutService, expectedOrigin: runtime.config.publicOrigin });
+  const catalogRoutes = runtime && createCatalogRoutes({ catalog: runtime.catalog });
   return createHttpServer(async (request, response) => {
     const url = new URL(request.url ?? '/', 'http://localhost');
     response.setHeader('x-content-type-options', 'nosniff');
@@ -50,14 +55,12 @@ export function createSentaDemoServer({ runtime = null } = {}) {
 
     try {
       if (request.method === 'GET' && url.pathname === '/api/health') {
-        sendJson(response, 200, { status: 'ok', storage: runtime ? 'sqlite' : 'unavailable' });
+        sendJson(response, 200, { status: 'ok', storage: runtime ? 'sqlite' : 'unavailable', checkout: runtime?.checkoutService ? 'stripe_test' : 'unconfigured' });
         return;
       }
       if (authRoutes && await authRoutes(request, response, url)) return;
-      if (runtime && request.method === 'GET' && url.pathname === '/api/catalog') {
-        sendJson(response, 200, { restaurants: runtime.catalog.listActive() }, { 'cache-control': 'public, max-age=60' });
-        return;
-      }
+      if (runtime?.stripeWebhookRoute && await runtime.stripeWebhookRoute(request, response, url)) return;
+      if (catalogRoutes && catalogRoutes(request, response, url)) return;
       if (conversationRoutes && await conversationRoutes(request, response, url)) return;
       if (orderRoutes && await orderRoutes(request, response, url)) return;
 
@@ -77,7 +80,7 @@ const isDirectRun = process.argv[1] && resolve(process.argv[1]) === fileURLToPat
 if (isDirectRun) {
   const config = loadConfig();
   const runtime = createRuntime({ config });
-  const server = createSentaDemoServer({ runtime });
+  const server = createSentaServer({ runtime });
   server.listen(config.port, config.host, () => {
     console.log(`Senta Checkout listening at http://${config.host}:${config.port}`);
   });

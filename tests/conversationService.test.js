@@ -59,3 +59,14 @@ test('order creation and message persistence roll back together on a failed turn
   assert.equal(conversationRepo.findOwned(created.id, 'owner').messages.length, 0);
   assert.ok(catalog.findItem('northstar-grain-bowl'));
 });
+
+test('conversation can add a second catalog item and return an itemized cart total', async (t) => {
+  const { service } = await fixture(t);
+  const conversation = service.createConversation('owner');
+  service.sendMessage({ userId: 'owner', conversationId: conversation.id, text: 'Get one Northstar Grain Bowl' });
+  const result = service.sendMessage({ userId: 'owner', conversationId: conversation.id, text: 'Add two Crispy Chickpea Bowls' });
+  assert.equal(result.order.items.length, 2);
+  assert.deepEqual(result.order.items.map((line) => line.quantity), [1, 2]);
+  assert.equal(result.cart.lineItems.length, 2);
+  assert.equal(result.cart.totalCents, 3450);
+});

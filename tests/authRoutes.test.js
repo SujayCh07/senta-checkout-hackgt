@@ -60,3 +60,17 @@ test('HTTP auth routes issue an HttpOnly session and require CSRF to revoke it',
   assert.equal(logout.status, 200);
   assert.match(logout.headers['set-cookie'], /Max-Age=0/);
 });
+
+test('auth routes enforce a bounded per-address attempt window', async () => {
+  const routes = createAuthRoutes({ authService: { register() {}, login() {} } });
+  for (let attempt = 0; attempt < 12; attempt += 1) {
+    const result = await invoke(routes, {
+      method: 'POST', path: '/api/auth/login',
+      headers: { 'content-type': 'text/plain' },
+    });
+    assert.equal(result.status, 415);
+  }
+  const limited = await invoke(routes, { method: 'POST', path: '/api/auth/login' });
+  assert.equal(limited.status, 429);
+  assert.equal(limited.body.code, 'rate_limited');
+});

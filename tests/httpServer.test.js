@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 import { createRuntime } from '../src/runtime.js';
-import { createSentaDemoServer } from '../src/server.js';
+import { createSentaServer } from '../src/server.js';
 
 const baseUrl = 'http://localhost:3002';
 const originHeaders = { origin: baseUrl };
@@ -13,7 +13,7 @@ test('HTTP checkout foundation requires auth, persists owned orders, and enforce
   const directory = await mkdtemp(join(tmpdir(), 'senta-http-'));
   const databasePath = join(directory, 'http.sqlite');
   const runtime = createRuntime({ databasePath });
-  const server = createSentaDemoServer({ runtime });
+  const server = createSentaServer({ runtime });
   try {
     await new Promise((resolve, reject) => {
       server.once('error', reject);

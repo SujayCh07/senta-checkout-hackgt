@@ -4,24 +4,34 @@ import { sendError, sendJson } from '../responses.js';
 
 const IDS = '[a-f0-9-]{36}';
 
-export function createConversationRoutes({ conversations, authService, cookieName = 'senta_session' }) {
+export function createConversationRoutes({ conversations, authService, cookieName = 'senta_session', expectedOrigin = null }) {
   return async function handleConversationRoute(request, response, url) {
     const create = request.method === 'POST' && url.pathname === '/api/conversations';
+    const history = request.method === 'GET' && url.pathname === '/api/conversations';
     const match = url.pathname.match(new RegExp(`^/api/conversations/(${IDS})(?:/messages)?$`, 'i'));
     const messageRoute = match && url.pathname.endsWith('/messages');
     const readRoute = request.method === 'GET' && match && !messageRoute;
-    if (!create && !messageRoute && !readRoute) return false;
+    if (!create && !history && !messageRoute && !readRoute) return false;
 
     try {
       const user = authenticateRequest(request, authService, cookieName);
       if (!user) throw Object.assign(new Error('Sign in is required.'), { code: 'unauthenticated' });
       if (create || messageRoute) {
-        assertRequestOrigin(request);
+        assertRequestOrigin(request, expectedOrigin);
         assertCsrf(request, user);
       }
       if (create) {
         const created = conversations.createConversation(user.id);
         sendJson(response, 201, created, { 'cache-control': 'no-store' });
+        return true;
+      }
+      if (history) {
+        const limitValue = url.searchParams.get('limit') ?? '20';
+        const limit = Number(limitValue);
+        if (!/^\d+$/.test(limitValue) || limit < 1 || limit > 100) {
+          throw Object.assign(new Error('History limit must be between 1 and 100.'), { code: 'invalid_pagination' });
+        }
+        sendJson(response, 200, conversations.listConversations(user.id, { limit, cursor: url.searchParams.get('cursor') }), { 'cache-control': 'no-store' });
         return true;
       }
       if (readRoute) {
@@ -37,9 +47,9 @@ export function createConversationRoutes({ conversations, authService, cookieNam
   };
 }
 
-function assertRequestOrigin(request) {
+function assertRequestOrigin(request, configuredOrigin) {
   const origin = request.headers.origin;
-  const expected = `${request.socket?.encrypted ? 'https' : 'http'}://${request.headers.host}`;
+  const expected = configuredOrigin || `${request.socket?.encrypted ? 'https' : 'http'}://${request.headers.host}`;
   assertSameOrigin(request, expected);
   if (!origin) throw Object.assign(new Error('Request origin is not allowed.'), { code: 'origin_rejected' });
 }

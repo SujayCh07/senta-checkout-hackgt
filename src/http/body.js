@@ -23,6 +23,17 @@ export async function readJsonBody(request, maxBytes = MAX_JSON_BODY_BYTES) {
   }
 }
 
+export async function readRawBody(request, maxBytes = 64 * 1024) {
+  const chunks = [];
+  let size = 0;
+  for await (const chunk of request) {
+    size += chunk.length;
+    if (size > maxBytes) throw codedError('body_too_large', 'Request body is too large.');
+    chunks.push(chunk);
+  }
+  return Buffer.concat(chunks);
+}
+
 function codedError(code, message) {
   return Object.assign(new Error(message), { code });
 }

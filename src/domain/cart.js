@@ -1,24 +1,3 @@
-export function buildCart(order) {
-  const itemTotalCents = order.item.unitPriceCents * order.quantity;
-
-  return {
-    currency: 'USD',
-    lineItems: [{
-      itemId: order.item.id,
-      name: order.item.name,
-      quantity: order.quantity,
-      unitPriceCents: order.item.unitPriceCents,
-      totalCents: itemTotalCents,
-      modifiers: { ...order.modifiers },
-    }],
-    subtotalCents: itemTotalCents,
-    taxCents: 0,
-    deliveryFeeCents: 0,
-    totalCents: itemTotalCents,
-    pricingNote: 'Demo catalog pricing; taxes and delivery are not calculated.',
-  };
-}
-
 export function calculateOrderTotals(item, quantity, modifierIds = []) {
   if (!item || !Number.isInteger(item.priceCents) || item.priceCents < 0) {
     throw codedError('invalid_order', 'Menu item pricing is invalid.');
@@ -47,6 +26,30 @@ export function calculateOrderTotals(item, quantity, modifierIds = []) {
     totalCents: lineTotalCents,
     modifiers: selected.map(({ id, name, priceDeltaCents }) => ({ id, name, priceDeltaCents })),
   };
+}
+
+export function calculateCartTotals(lines, { maxLines = 50 } = {}) {
+  if (!Array.isArray(lines) || lines.length === 0 || lines.length > maxLines) {
+    throw codedError('invalid_order', `A cart must contain between 1 and ${maxLines} items.`);
+  }
+  const currency = lines[0]?.item?.currency;
+  if (!/^[A-Z]{3}$/.test(currency ?? '')) throw codedError('invalid_order', 'Cart currency is invalid.');
+  const lineItems = lines.map(({ item, quantity, modifierIds = [] }) => {
+    if (item.currency !== currency) throw codedError('invalid_order', 'A cart cannot mix currencies.');
+    const totals = calculateOrderTotals(item, quantity, modifierIds);
+    return {
+      itemId: item.id,
+      name: item.name,
+      quantity,
+      unitPriceCents: totals.unitPriceCents,
+      totalCents: totals.lineTotalCents,
+      modifiers: totals.modifiers,
+      currency,
+    };
+  });
+  const subtotalCents = lineItems.reduce((total, line) => total + line.totalCents, 0);
+  if (!Number.isSafeInteger(subtotalCents)) throw codedError('invalid_order', 'Cart total exceeds the supported range.');
+  return { currency, lineItems, subtotalCents, totalCents: subtotalCents };
 }
 
 function codedError(code, message) {
