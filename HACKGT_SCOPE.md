@@ -54,3 +54,9 @@ The tests use mocks and fixtures; they do not verify live DoorDash, Stripe, Linq
 ## Public-safety scan
 
 Scanned this directory for environment files, phone-number patterns, email addresses, credential-shaped Stripe keys/webhook secrets, bearer tokens, common database/provider endpoints, and address-like test literals. No such live values remain. The patch necessarily names Stripe, DoorDash, and Linq in code paths; those are integration names, not credentials. Test sender/address values and placeholder credentials were replaced with non-personal placeholders. No screenshot was included because the only screenshot/demo artifacts in the production checkout are uncommitted and cannot be date-verified.
+
+## Separate local demo app
+
+The repository also contains a small independently written demo app added after this historical audit, on September 27, 2026. It is not part of the five-commit HackGT range and is excluded from the baseline/current commit counts and the sanitized production patch.
+
+The demo's `src/` modules model conversation orchestration, deterministic order state, cart totals, an in-memory session store, and a mock checkout adapter. `public/` contains a chat/cart UI and a simulated checkout page. `tests/` covers the service state transitions and the HTTP path. The demo does not include the production backend or connect to Linq, a model API, DoorDash, Stripe, or a database. Its simulated payment cannot move money. See `ARCHITECTURE.md` for routes, state ownership, and limitations.

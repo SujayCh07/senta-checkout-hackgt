@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Demo checkout · Senta</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body class="checkout-page">
+    <main class="checkout-shell">
+      <a class="brand checkout-brand" href="/"><span class="brand-mark">s</span><span>Senta<span class="brand-light"> Checkout</span></span></a>
+      <section class="checkout-card">
+        <div class="demo-badge"><span class="pulse"></span> Simulated checkout</div>
+        <p class="eyebrow">Secure handoff</p>
+        <h1>Review your order.</h1>
+        <p class="checkout-explainer">This local demo does not connect to a payment provider. No card details are collected and no charge can be made.</p>
+        <div id="checkout-summary" class="checkout-summary">Loading checkout…</div>
+        <button id="simulate-payment" class="checkout-link simulate-button" type="button" disabled>Simulate test payment <span aria-hidden="true">↗</span></button>
+        <p id="checkout-status" class="checkout-status" aria-live="polite"></p>
+        <a class="back-link" href="/">← Back to your conversation</a>
+      </section>
+    </main>
+    <script type="module" src="/checkout.js"></script>
+  </body>
+</html>

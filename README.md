@@ -4,7 +4,7 @@ Senta is an existing conversational commerce platform.
 
 During HackGT 13, we focused on building and hardening Senta Checkout, a conversational food-ordering workflow that takes a user from a natural-language request through restaurant and item selection, required customizations, cart creation, and checkout.
 
-This repository contains code and documentation for work completed during the HackGT 13 hacking period. The production Senta backend is private and includes additional infrastructure that is not included here.
+The production Senta backend is private and includes additional infrastructure that is not included here. The five verified post-cutoff production commits are preserved as a sanitized patch. This repository also contains a small local demo app, added separately after the HackGT evidence was packaged; the demo is not part of those weekend commits.
 
 ## What it does
 
@@ -12,7 +12,7 @@ A user can text something like:
 
 > Get me 2 Crunchwrap Supremes from Taco Bell.
 
-The HackGT changes improve how the existing service carries restaurant, item, quantity, modifier, cart, and checkout intent across messages. The patch documents the committed implementation changes and their regression tests; this repository is not a standalone ordering service.
+The local demo keeps a sample order together as the user chooses tomatoes, changes the quantity or item, and continues to a simulated checkout page. Its layers follow the same broad conversational-commerce boundaries as Senta while using original demo code and mock systems.
 
 ## Why we built it
 
@@ -20,14 +20,7 @@ Users who already know what they want should not have to repeatedly search, brow
 
 ## HackGT work
 
-The following claims are tied to the five commits after the stated cutoff:
-
-- Made cuisine-only and named-merchant requests continue into restaurant discovery, including exact provider-name handling for a requested merchant.
-- Improved conversation continuation for saved menu categories, order quantity corrections, merchant changes, cancellation, and slow in-flight restaurant searches.
-- Added an unpaid pickup-to-manual-delivery path, delivery and service-fee line items, and fee-aware payment validation and summaries.
-- Tightened pickup cart ownership checks across user, conversation, task, and store state.
-
-The detailed evidence is in [WEEKEND_COMMITS.md](WEEKEND_COMMITS.md) and [HACKGT_SCOPE.md](HACKGT_SCOPE.md). All 24 touched files already existed before the cutoff; the weekend range modifies them and adds no new production source files.
+The verified weekend changes improved cuisine-only and named-merchant discovery, ordering continuation and corrections, and pickup checkout and payment handling. The evidence is in [WEEKEND_COMMITS.md](WEEKEND_COMMITS.md), [HACKGT_SCOPE.md](HACKGT_SCOPE.md), and [weekend-checkout.patch](weekend-checkout.patch). Those files describe the five commits after the cutoff; the local demo app is a separate addition.
 
 ## Existing before HackGT
 
@@ -35,43 +28,55 @@ The baseline commit already contains Senta’s messaging and conversation servic
 
 ## Architecture
 
+The demo app uses a browser chat UI, a small HTTP API, deterministic order state, an in-memory conversation store, a sample catalog, and a simulated checkout adapter. The language interpreter can recognize only a small set of demo phrases; deterministic application logic owns the merchant, item, quantity, modifiers, cart, and checkout status.
+
 ```text
-User text over Linq
-        |
-        v
-Conversation recovery and intent/planner interpretation
-        |
-        v
-Deterministic continuation and checkout-task state
-        |
-        v
-DoorDash merchant/menu/cart/quote capabilities
-        |
-        v
-Persisted pickup draft and provider-verified quote
-        |
-        v
-Stripe Checkout with separately itemized fees
-        |
-        v
-Payment webhook validation and Linq/outbox handoff
+Browser chat
+    |
+    v
+POST /api/conversations/:id/messages
+    |
+    v
+ConversationService
+  /       |        \
+parser  order     catalog adapter
+          state
+    |
+    v
+Cart builder -> in-memory conversation store
+    |
+    v
+Mock checkout adapter -> local demo checkout page
 ```
 
-The language model can interpret flexible wording, but deterministic application state owns merchant identity, item, quantity, modifiers, cart identity, payment status, and checkout transitions. A successful payment event must match the saved checkout session, amount, currency, fee metadata, task, and cart before it can update the order.
+This demo does not call Linq, a language model, DoorDash, Stripe, or a database. Its checkout action only changes an in-memory session to `simulated_paid`; it cannot collect card details or move money. See [ARCHITECTURE.md](ARCHITECTURE.md) for both the production flow described by the patch and the separate local demo architecture.
 
-See [ARCHITECTURE.md](ARCHITECTURE.md) for the end-to-end flow, persistence, ownership checks, external services, and failure cases.
+## Run locally
 
-## Running the code
+Requirements: Node.js 20 or newer. There are no third-party runtime dependencies.
 
-This repository is a review artifact containing a sanitized patch and documentation, not a runnable source checkout. The patch references private/pre-existing modules and requires the original Senta repository and its private provider infrastructure to build or run.
+```sh
+npm run dev
+```
 
-This repository contains the HackGT-specific implementation and tests extracted from a larger private system. The production environment requires private provider infrastructure and credentials that are intentionally not included.
+Open [http://localhost:3002](http://localhost:3002). Try an order, answer the tomatoes question, send `checkout`, then use the simulated checkout button. No real orders or payments are made.
 
-No standalone `npm run dev` or test command is provided because that would imply this extracted patch is independently executable.
+Run the checks with:
+
+```sh
+npm test
+npm run check
+```
+
+The integration test uses `localhost:3002`; stop another local process using that port before running it.
+
+## Demo boundaries
+
+The sample menu and prices are local fixtures. Tax, delivery, restaurant availability, customer authentication, durable storage, and provider quote validation are not implemented in the demo. Conversations disappear when the server restarts. The server binds to `127.0.0.1` and is for local demonstration only. Do not enter personal, address, or payment information.
 
 ## Production note
 
-The live Senta demo runs on private production infrastructure. This repository documents and contains the HackGT-specific code contribution while keeping unrelated startup infrastructure and credentials private.
+The live Senta demo runs on private production infrastructure. This repository documents the verified HackGT code contribution and provides a separate local demo while keeping unrelated startup infrastructure and credentials private.
 
 ## Patch provenance
 

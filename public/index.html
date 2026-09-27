@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#f8f5ef" />
+    <title>Senta Checkout</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <main class="app-shell">
+      <header class="topbar">
+        <a class="brand" href="/" aria-label="Senta Checkout home">
+          <span class="brand-mark">s</span>
+          <span>Senta<span class="brand-light"> Checkout</span></span>
+        </a>
+        <div class="topbar-right">
+          <span class="demo-badge"><span class="pulse"></span> Demo mode</span>
+          <button id="new-order" class="text-button" type="button">New conversation</button>
+        </div>
+      </header>
+
+      <section class="intro">
+        <p class="eyebrow">A better way to order</p>
+        <h1>Just say what you’re craving.</h1>
+        <p class="intro-copy">Tell Senta what you want. We’ll keep the details together while you make it yours.</p>
+      </section>
+
+      <section class="workspace" aria-label="Senta ordering demo">
+        <div class="chat-card">
+          <div class="card-heading">
+            <div class="assistant-identity">
+              <div class="avatar">s</div>
+              <div><strong>Senta</strong><span>Order assistant</span></div>
+            </div>
+            <span id="connection-status" class="connection-status">Connecting</span>
+          </div>
+
+          <div id="messages" class="messages" aria-live="polite" aria-label="Conversation"></div>
+
+          <div class="suggestions" aria-label="Try an example">
+            <button class="suggestion" type="button" data-message="Get me 2 Crunchwrap Supremes from Taco Bell">2 Crunchwraps</button>
+            <button class="suggestion" type="button" data-message="Actually, the black bean one">Black bean</button>
+            <button class="suggestion" type="button" data-message="No tomatoes">No tomatoes</button>
+          </div>
+
+          <form id="composer" class="composer">
+            <label class="sr-only" for="message-input">Message Senta</label>
+            <input id="message-input" name="message" autocomplete="off" placeholder="Tell me what you’d like…" required />
+            <button class="send-button" type="submit" aria-label="Send message">
+              <span>Send</span><span aria-hidden="true">↗</span>
+            </button>
+          </form>
+          <p class="privacy-note">Demo only. Please don’t enter personal or payment information.</p>
+        </div>
+
+        <aside class="order-card" aria-label="Current order">
+          <div class="order-heading"><div><p class="eyebrow">Your order</p><h2>Cart preview</h2></div><span id="cart-count" class="cart-count">0</span></div>
+          <div id="empty-cart" class="empty-cart">
+            <div class="plate-icon" aria-hidden="true">✳</div>
+            <strong>Your cart starts here</strong>
+            <p>Tell Senta what you want and we’ll build the order together.</p>
+          </div>
+          <div id="cart-content" class="cart-content" hidden>
+            <div class="merchant-row"><span class="merchant-dot"></span><span id="merchant-name"></span><span class="pickup-label">PICKUP</span></div>
+            <div class="cart-item"><div><strong id="item-name"></strong><span id="item-modifier" class="item-modifier"></span></div><span id="item-quantity" class="item-quantity"></span></div>
+            <div class="price-row"><span>Subtotal</span><strong id="subtotal"></strong></div>
+            <div class="price-row muted"><span>Tax &amp; delivery</span><span>Not calculated</span></div>
+            <div class="price-total"><span>Demo total</span><strong id="total"></strong></div>
+            <p class="cart-footnote">Menu prices are sample data. Final provider pricing is not connected.</p>
+            <a id="checkout-link" class="checkout-link" href="#" hidden>Continue to demo checkout <span aria-hidden="true">↗</span></a>
+            <div id="order-state" class="order-state">Waiting for your order</div>
+          </div>
+        </aside>
+      </section>
+
+      <footer class="footer"><span>Conversational commerce, made simpler.</span><span>Local demo · Mock catalog · No real orders or payments</span></footer>
+    </main>
+    <script type="module" src="/app.js"></script>
+  </body>
+</html>
